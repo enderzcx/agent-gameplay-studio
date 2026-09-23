@@ -1,0 +1,65 @@
+# --- secrets: never commit these ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.mobileprovision
+credentials.json
+secrets.yaml
+secrets.yml
+
+# --- build output ---
+tools/gamerec/build/
+*.app/
+build/
+dist/
+*.o
+*.dSYM/
+
+# --- python ---
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+
+# --- media: this repo ships synthetic fixtures only ---
+# Backstop, not a guarantee. Do not rely on it to keep a real capture out of a commit.
+# The committed examples/*.tsv and *.md are hand-written synthetic data, not captures.
+*.mp4
+*.mov
+*.mkv
+*.webm
+*.m4a
+*.wav
+*.mp3
+*.flac
+*.aac
+*.opus
+*.ogg
+*.srt
+*.ass
+*.vtt
+*.b64
+*.jsonl
+
+# --- local working output ---
+out/
+work/
+runs/
+*.metrics.json
+*.status.json
+*.meta.json
+*.focus.jsonl
+*.log
+
+# --- os / editor noise ---
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/

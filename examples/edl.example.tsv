@@ -1,0 +1,11 @@
+# SYNTHETIC EXAMPLE — fabricated data, not a real match.
+# 7-column edit decision list consumed by tools/voice/build_sample.sh.
+# Header must match byte for byte (TAB separated):
+#   seg  src_start  src_end  audio_file  offset  freeze  subtitle_text
+# audio_file is resolved relative to the <voice_dir> argument.
+# freeze = explicitly registered freeze-frame seconds at the end of this segment (0 = none).
+# The segment's on-screen window is (src_end - src_start) + freeze, and the narration must fit:
+#   offset + measured_audio_duration <= window + FIT_TOL
+seg	src_start	src_end	audio_file	offset	freeze	subtitle_text
+1	0.0	2.0	seg01.wav	0.2	0	synthetic line one
+2	5.0	6.5	seg02.wav	0.1	1.0	synthetic line two

@@ -1,0 +1,10 @@
+# SYNTHETIC EXAMPLE — fabricated data, not a real match.
+# Unified timeline: video, voice and subtitles all share this one file.
+# Arithmetic the checker enforces:
+#   len(clip_range)  == len(source_range)
+#   len(final_range) == len(clip_range) / speed + freeze
+#   clip_range and final_range must not overlap within one asset_id
+asset_id	event_id	source_range	clip_range	final_range	speed/freeze	narration_text	audio_duration_s	subtitle_source
+rec-example-01	ev-001	470.0-478.5	0.0-8.5	12.3-20.8	1x	"opening line, sample only"	8.1	tts-run-example
+rec-example-01	ev-002	478.5-496.0	8.5-26.0	20.8-41.3	1x + 定格3s	"card pick, sample only"	14.2	tts-run-example
+rec-example-01	ev-003	496.0-506.0	26.0-36.0	41.3-46.3	2x	"sped-up traversal, sample only"	4.6	tts-run-example

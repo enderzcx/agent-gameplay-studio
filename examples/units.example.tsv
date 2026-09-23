@@ -1,0 +1,12 @@
+# SYNTHETIC EXAMPLE — fabricated data, not a real match.
+# Commentary prep units. The three fields below must stay separate and must never backfill
+# each other: stated_reason (what was said at the time) / retrospective_commentary (hindsight,
+# including hindsight rationalisation) / outcome (what actually happened).
+# coverage: ok | na (did not occur this run) | coverage_gap (in the log, not on screen)
+event_id	source_range	state	action	stated_reason	retrospective_commentary	outcome	coverage
+ev-001	470.0-478.5	HP 80/80, 3 enemies on screen	played a block card	"hold this turn, take nothing"	looking back, the potion was saveable	blocked 12	ok
+ev-002	478.5-496.0	combat won, pick 1 of 3	added a card to the deck	null	should have taken the damage card instead	deck +1 card	ok
+ev-003	496.0-506.0	shop, 210 gold	left without buying	null	null	nothing bought	ok
+ev-004	506.0-512.0	campfire	upgraded a card	"upgrade now, it scales"	null	card upgraded	ok
+ev-005	512.0-518.0	not present in this run	no action	null	null	not applicable	na
+ev-006	518.0-530.0	boss fight (log only, screen missing)	no action	null	null	unknown	coverage_gap
