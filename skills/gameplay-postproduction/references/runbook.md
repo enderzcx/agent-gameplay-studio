@@ -140,30 +140,36 @@ python3 "$GCB" video --path /tmp/detail.mp4 --kind game \
   --question "读出这三张候选牌的名字与效果文字" --json
 
 # ③ 审听：只给**声音**，画面不要给内容。两种都实测过，任选：
-#    (a) 直接送音频（要显式给 MIME，并且用 --kind generic：review 模式强制 JSON，模型常常给不出）
+#    (a) 直接送音频（要显式给 MIME）
 python3 "$GCB" video --path /abs/voice_master.wav --beefapi-media-mime audio/wav \
-  --kind generic --question "逐句转写这段音频，并指出念错/重复/断句别扭的位置；不要输出 JSON" --json
-#    (b) 黑屏 + 同一条音轨的 MP4（老通道不吃裸音频时的稳妥做法）
+  --question '只输出一个 JSON 对象，不要输出 JSON 之外的文字：{"events":[{"start_s":0,"end_s":0,"what":"…"}],"audio_said":[{"start_s":0,"end_s":0,"text":"逐句转写"}],"pronunciation_issues":["念错/多音字，附时间"],"repeat_or_awkward":["重复或断句别扭，附时间"],"uncertain":["听不清或无法判断的"]}' --json
+#    (b) 黑屏 + 同一条音轨的 MP4（通道不吃裸音频时的稳妥做法）
 ffmpeg -nostdin -v error -y -f lavfi -i "color=c=black:s=960x966:r=10" -i /abs/voice_master.wav \
   -c:v libx264 -crf 28 -pix_fmt yuv420p -c:a aac -shortest /abs/audit-audio-only.mp4
-python3 "$GCB" video --path /abs/audit-audio-only.mp4 --kind generic \
-  --question "画面全黑，只依据听到的内容逐句转写，并指出念错/重复/断句别扭的位置" --json
+python3 "$GCB" video --path /abs/audit-audio-only.mp4 \
+  --question '画面全黑，只依据听到的内容。只输出一个 JSON 对象，不要 JSON 之外的文字：{"events":[{"start_s":0,"end_s":0,"what":"全黑无画面"}],"audio_said":[{"start_s":0,"end_s":0,"text":"逐句转写"}],"repeat_or_awkward":["…"],"uncertain":["…"]}' --json
 
 # ④ 审片：最终实际导出的 MP4
-python3 "$GCB" video --path /abs/out/final.mp4 --kind generic \
-  --question "字幕是否全程可见/被裁/挡手牌？旁白与画面阶段是否一致？有无明显音画不同步？" --json
+python3 "$GCB" video --path /abs/out/final.mp4 \
+  --question '只输出一个 JSON 对象，不要 JSON 之外的文字：{"events":[{"start_s":0,"end_s":0,"what":"画面阶段"}],"audio_said":[{"start_s":0,"end_s":0,"text":"听到的旁白"}],"subs_visible":true,"subs_occlusion":false,"phase_match":"旁白与画面阶段是否一致、提前或滞后几秒","av_sync":"有无明显不同步","audio_video_mismatch":[{"start_s":0,"end_s":0,"why":"…"}],"uncertain":["…"]}' --json
 ```
 
 **别用纯文本命令假装在听音频**：本机这个通道的 `ask` 子命令**没有任何媒体入参**
 （只有文本 + 模型参数），"听这段音频"必须是 ③ 里的 `video --path` 形式。
 
-两条实测口径：
+**视频模式的 JSON 是硬门槛，和 `--kind` 无关**（依据通道 0.1.3 的 validator 源码，不是推测）：
+`video_contract_error` / `video_semantic_error` 只按 `mode == "video"` 判定，`--kind` 只影响提示词里的
+一句上下文——`--kind generic` **不是**宽容开关。要求是：
 
-- **`--kind review` 强制模型输出 JSON**，模型经常给不出 → `failure_kind=contract`
-  （"正文未包含可解析的 JSON 对象"）。审听/审片这类开放式问题用 `--kind generic` 更稳；
-  真需要结构化结论时再收紧，并把"这一次是格式失败、不是内容失败"如实写出来。
-- **就算是纯音频输入，模型也可能编造画面描述**（实测：给 `.wav` 却回报"卡牌文字看不清"）。
-  只采信转写与听感相关的部分，其余一律标"不可靠"，需要画面就另外给画面。
+1. 正文里必须有一个**可解析的 JSON 对象**（允许 ``` 围栏或前后缀）；
+2. 必须含 **`events`、`audio_said`、`uncertain`** 三个键（缺一即 `failure_kind=contract`）；
+3. `events` / `audio_said` / `visible_cards` 里**至少有一条真实观测**，否则按"假完成"被拒。
+
+所以**绝不要写"不要输出 JSON"**——那必然撞格式门槛，让用户反复卡在同一处。要问开放式问题，就把答案
+放进 JSON 的字段里（如上面的 `pronunciation_issues` / `phase_match`），并写明"不要输出 JSON 之外的文字"。
+
+另一条实测口径：**就算纯音频输入，模型也可能编造画面描述**（实测：给 `.wav` 却回报"卡牌文字看不清"）。
+只采信转写与听感相关的部分，其余一律标"不可靠"；需要画面就另外给画面。
 
 **后备通道怎么写才算诚实**：
 
@@ -180,18 +186,12 @@ python3 "$GCB" video --path /abs/out/final.mp4 --kind generic \
 **405** 在 0.91/1.45/2.43/2.55MB —— 其中 2.55MB 那次重试后成功、2.43MB 那次重试后仍失败。
 **原因未确定，也不可保证**：既不能说成"文件太大"，也不能说成"重试一定好"，更没有可依赖的大小阈值。
 一次重试仍失败时：改用**独立压缩分析副本**或有界短分段，并记录**实际 hash 与源↔副本时间映射**；
-**不改母带**，也不声称"小于某个固定大小就能过"；仍未成功就如实标未验证，不要连环重试。
+**不改母带**，不声称"小于某个固定大小就能过"；仍未成功就如实标未验证，**不要连环重试**。
 
-**`failure_kind=contract` 是格式失败，不是内容失败**：模型正文里没有可解析 JSON 时会出现，
-**http 200、内容往往是对的**。本轮样本里它与请求体大小**没有稳定关系**（349KB 与 2.6MB 都出现过），
-所以不要据此推断"越大越容易"。处置：明确要求 JSON，或改用压缩分析副本压低回答长度；
-不要把它当内容失败重跑，也不要把这次的原始正文当已验收结果。
-**独立压缩分析副本**或有界短分段，并记录**实际 hash 与源↔副本时间映射**；**不改母带**，
-也不声称「一定小于某个固定大小就能过」。
-
-**`failure_kind=contract`（正文未包含可解析的 JSON 对象）是格式失败，不是内容失败**：
-http 200、模型其实答了，只是没按 JSON 回。明确要求 JSON、或改用压缩分析副本压低回答长度；
-不要把它当内容失败重跑，也不要把这次的原始正文当已验收结果。
+**`failure_kind=contract` 是格式失败，不是内容失败**：`http 200`、模型其实答了，只是没按契约回 JSON。
+它与请求体大小**没有稳定关系**（本轮 349KB 与 2.6MB 都出现过），所以不要据此推断"越大越容易"。
+处置：**把提示词改成明确要求 JSON 并把答案放进字段**（见本节命令），或改用压缩分析副本压低回答长度；
+不要当内容失败重跑，也不要把这次的原始正文当已验收结果。
 
 ---
 
@@ -392,7 +392,7 @@ python3 "$C" ready review-sheet.md --final-mp4 out/final.mp4 \
 | "审听"报出画面细节 | 给了画面，模型把看来的当听来的 | 该次结论降级；审听只给音轨 |
 | 自动后备被触发 | 可能是把 auth 失败误判成超时 | 附实测证据；否则写"未验证" |
 | 请求被拒（405 等） | **原因未确定**：本轮 0.91/1.45/2.43/2.55MB 出过 405，0.33–2.65MB 也有成功；**不可保证** | 对同一请求**有界重试一次**；仍失败改用压缩分析副本或有界短分段，记录 hash 与时间映射，不改母带；再失败就如实标未验证 |
-| `failure_kind=contract` | 模型正文里没有可解析 JSON（http 200，**内容其实是对的**） | 这是格式失败不是内容失败；明确要 JSON 或改用压缩分析副本压低回答长度；不要当内容失败重跑 |
+| `failure_kind=contract` | **视频模式一律要 JSON**：`events`/`audio_said`/`uncertain` 必需且至少一条真实观测，与 `--kind` 无关；只给散文就失败（http 200，**内容往往是对的**） | 格式失败不是内容失败：改成**明确要 JSON、把答案放进字段**，**不要写"不要输出 JSON"**；不要当内容失败重跑 |
 
 ---
 
