@@ -11,11 +11,13 @@
 """
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE.parent / "tools" / "voice"))
+TOOLS = HERE.parent / "tools" / "voice"
+sys.path.insert(0, str(TOOLS))
 import subtitles as S  # noqa: E402
 
 
@@ -71,6 +73,53 @@ def test_ass_text_is_escaped() -> None:
     print("ok  test_ass_text_is_escaped（{ } 与换行不会变成 ASS 指令，也不丢字）")
 
 
+def test_bad_srt_is_rejected_not_skipped() -> None:
+    """坏条必须明确失败。历史上"静默 continue"让 74 条只烧进 1 条没被任何人发现。"""
+    cases = {
+        "没有时间码行": "1\n这不是时间码\n随便一段话\n",
+        "end <= start": "1\n00:00:05,000 --> 00:00:04,000\n倒着走\n",
+        "空文本": "1\n00:00:01,000 --> 00:00:02,000\n\n",
+        "顺序错乱": "1\n00:00:05,000 --> 00:00:06,000\n后\n\n2\n00:00:01,000 --> 00:00:02,000\n前\n",
+        "整份为空": "\n\n",
+    }
+    for name, text in cases.items():
+        try:
+            S.parse_srt(text)
+        except SystemExit as e:
+            assert "subtitle error" in str(e), (name, e)
+        else:
+            raise AssertionError(f"{name}：坏 SRT 被静默接受了")
+    print(f"ok  test_bad_srt_is_rejected_not_skipped（{len(cases)} 种坏输入全部明确失败）")
+
+
+def test_crlf_and_english_line_breaks() -> None:
+    # CRLF：块分隔与行尾都必须正确处理，不能把 \r 带进字幕文本
+    srt = "1\r\n00:00:01,000 --> 00:00:02,000\r\nhello world\r\n"
+    c = S.parse_srt(srt)
+    assert len(c) == 1 and c[0].text == "hello world", c
+    # 西文折行必须补空格（否则 helloworld，词边界丢失）；中文折行不能补空格
+    assert S.join_wrapped_lines(["hello", "world"]) == "hello world"
+    assert S.join_wrapped_lines(["你好", "世界"]) == "你好世界"
+    assert S.join_wrapped_lines(["你好", "world"]) == "你好world"
+    two = S.parse_srt("1\n00:00:01,000 --> 00:00:02,000\nпервая строка\nвторая строка\n")
+    assert two[0].text == "первая строка вторая строка", two[0].text
+    print("ok  test_crlf_and_english_line_breaks（CRLF 干净；西文保留词边界，中文不加空格）")
+
+
+def test_numeric_args_are_validated(tmp: Path) -> None:
+    cues = tmp / "c.tsv"
+    cues.write_text("0\t1000\t短句\n", encoding="utf-8")
+    bad = [["--w", "0"], ["--h", "-5"], ["--size", "0"], ["--margin-lr", "-1"],
+           ["--margin-lr", "500"], ["--margin-v", "-3"]]
+    for extra in bad:
+        p = subprocess.run([sys.executable, str(TOOLS / "subtitles.py"), "build",
+                            "--cues", str(cues), "--srt", str(tmp / "o.srt"),
+                            "--ass", str(tmp / "o.ass"), "--w", "320", "--h", "240"] + extra,
+                           capture_output=True, text=True)
+        assert p.returncode != 0 and "subtitle error" in (p.stdout + p.stderr), (extra, p.stdout, p.stderr)
+    print(f"ok  test_numeric_args_are_validated（{len(bad)} 组非法数值全部拒绝）")
+
+
 def main() -> int:
     import tempfile
     with tempfile.TemporaryDirectory() as d:
@@ -80,7 +129,10 @@ def main() -> int:
         test_no_page_when_it_fits()
         test_srt_roundtrip_and_ass_playres(tmp)
         test_ass_text_is_escaped()
-    print("\n全部通过（5 项）")
+        test_bad_srt_is_rejected_not_skipped()
+        test_crlf_and_english_line_breaks()
+        test_numeric_args_are_validated(tmp)
+    print("\n全部通过（8 项）")
     return 0
 
 

@@ -26,6 +26,7 @@ import json
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -48,9 +49,13 @@ def probe_wh(video: Path) -> tuple[int, int]:
 
 
 def _has_audio(p: Path) -> bool:
+    """探测失败 ≠ 没有音轨。探测不出来就明确失败，绝不能默默 `-an` 把音轨丢掉。"""
     r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a:0",
                         "-show_entries", "stream=codec_type", "-of", "csv=p=0", str(p)],
                        capture_output=True, text=True)
+    if r.returncode != 0:
+        raise SystemExit(f"ffprobe 探测音轨失败（退出码 {r.returncode}）：无法判断 {p} 有没有音轨；"
+                         f"拒绝在'不知道'的情况下把它当无声处理（那会静默丢掉音轨）")
     return bool(r.stdout.strip())
 
 
@@ -82,23 +87,37 @@ def main() -> int:
         if not p.is_file():
             print(f"找不到{label}: {p}", file=sys.stderr)
             return 2
+    if a.labels and not Path(a.labels).is_file():
+        # 显式给了标注文件却不存在 —— 静默忽略等于"少烧了一层还说过关了"
+        print(f"找不到标注文件（--labels）: {a.labels}", file=sys.stderr)
+        return 2
 
     w, h = probe_wh(src)
     cues = S.parse_srt(srt.read_text(encoding="utf-8"))
     if not cues:
         print("字幕文件里没有可用 cue（拒绝产出一个没有字幕的“成片”）", file=sys.stderr)
         return 2
-    labels = S.parse_labels_tsv(Path(a.labels)) if a.labels and Path(a.labels).is_file() else None
+    labels = S.parse_labels_tsv(Path(a.labels)) if a.labels else None
     ass = out.with_name(out.stem + ".ass")
     S.write_ass(cues, ass, w, h, font=a.font, size=a.size,
                 margin_v=a.margin_v, margin_lr=S.effective_margin_lr(w, a.margin_lr), labels=labels)
 
+    # ffmpeg 的滤镜参数里 `,` `:` `'` `[` `]` `\` 都是语法字符，路径里出现它们就会把
+    # 整个 filtergraph 打断（而且报错信息很难懂）。所以真正喂给 ffmpeg 的 ASS 一律先复制到
+    # 一个**只含安全字符**的临时目录；交付用的那份仍然按原名留在输出旁边。
+    tmpdir = Path(tempfile.mkdtemp(prefix="subburn-"))
+    safe_ass = tmpdir / "burn.ass"
+    shutil.copyfile(ass, safe_ass)
+
     cmd = ["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(src),
-           "-vf", f"ass={ass}", "-c:v", "libx264", "-preset", "veryfast", "-crf", str(a.crf),
+           "-vf", f"ass={safe_ass}", "-c:v", "libx264", "-preset", "veryfast", "-crf", str(a.crf),
            "-pix_fmt", "yuv420p"]
     cmd += ["-c:a", "copy"] if _has_audio(src) else ["-an"]
     cmd += [str(out)]
-    subprocess.run(cmd, check=True)
+    try:
+        subprocess.run(cmd, check=True)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
     dur = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
                           "-of", "default=nw=1:nk=1", str(out)],

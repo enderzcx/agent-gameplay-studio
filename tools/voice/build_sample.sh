@@ -69,7 +69,9 @@ draft() {
     echo "见 $OUT/audit-report.json 或上面的 stdout/stderr。"
   } > "$OUT/DRAFT.txt"
   echo "!! $1" >&2
-  echo "!! 产物留在 $OUT，已标记为 draft，不是可交付成片。" >&2
+  # 注意 `${OUT}` 的花括号：macOS 自带的 bash 3.2 在非 UTF-8 locale 下会把紧跟其后的
+  # 中文标点当成变量名的一部分（实测「$OUT + 全角逗号」会得到 OUT\uFFFD: unbound variable）。
+  echo "!! 产物留在 ${OUT}，已标记为 draft，不是可交付成片。" >&2
 }
 SRC="${SRC_VIDEO:?必须显式给源视频：SRC_VIDEO=/path/to/source.mp4（本脚本不内置任何私有默认路径）}"
 CROP="${SRC_CROP:-scale=960:-2}"           # 默认等比缩到宽 960；混入带答案的面板时必须显式裁掉
@@ -85,6 +87,9 @@ SUB_FONT="${SUB_FONT:-Hiragino Sans GB}"; SUB_SIZE="${SUB_SIZE:-28}"
 SUB_MARGIN_V="${SUB_MARGIN_V:-16}"; SUB_MARGIN_LR="${SUB_MARGIN_LR:-100}"
 SUB_MAX_CHARS="${SUB_MAX_CHARS:-0}"
 BURN="$HERE/burn_subs.py"; SUBS_PY="$HERE/subtitles.py"
+# ffmpeg concat 列表里的路径用单引号包裹；路径自己含单引号时必须按 shell 风格转义
+# （' -> '\'' ），否则列表会被截断成"另一条不存在的路径"（实测：目录名带撇号直接失败）。
+clist() { printf "file '%s'\n" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
 # 字体名会写进 ASS 头；带换行/大括号就能注入 ASS 指令，这里直接拒绝。
 case "$SUB_FONT" in *[!A-Za-z0-9\ _-]*) echo "!! SUB_FONT 含可疑字符：$SUB_FONT" >&2; exit 2;; esac
 
@@ -172,10 +177,17 @@ mkdir -p "$OUT/concat" "$OUT/seg_norm"
 OUT="$(cd "$OUT" && pwd)"   # 绝对路径：ffmpeg concat 按列表文件所在目录解析相对路径
 : > "$OUT/concat/video.txt"; : > "$OUT/concat/audio.txt"; : > "$OUT/cues.tsv"
 if [ "$KEEP_SRC_AUDIO" = "1" ]; then
-  # 源片必须真的有音轨，否则"保留原声"就是在造假
-  if [ -z "$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_type -of csv=p=0 "$SRC" </dev/null)" ]; then
+  # "探测失败"和"确实没有音轨"是两件事：前者不能当成后者去做一条静音轨。
+  probe_rc=0
+  probe_out="$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_type -of csv=p=0 "$SRC" 2>/dev/null </dev/null)" || probe_rc=$?
+  if [ "$probe_rc" -ne 0 ]; then
     mkdir -p "$OUT"
-    draft "KEEP_SRC_AUDIO=1，但源片 $SRC 没有音轨（拒绝用静音轨冒充游戏原声）"
+    draft "KEEP_SRC_AUDIO=1，但 ffprobe 探测源音轨失败（退出码 ${probe_rc}）：无法判断有没有原声，拒绝继续"
+    exit 3
+  fi
+  if [ -z "$probe_out" ]; then
+    mkdir -p "$OUT"
+    draft "KEEP_SRC_AUDIO=1，但源片 $SRC 确实没有音轨（探测成功、零个音频流）：拒绝用静音轨冒充游戏原声"
     exit 3
   fi
   : > "$OUT/concat/srcaudio.txt"
@@ -209,7 +221,7 @@ tail -n +2 "$TL" | while IFS=$'\t' read -r seg ss se afile off freeze text; do
   vclip="$OUT/concat/v$n.mp4"
   ffmpeg -nostdin -v error -y -ss "$ss" -to "$se" -i "$SRC" -vf "$vf" -an \
     -c:v libx264 -preset veryfast -crf 18 "$vclip"
-  printf "file '%s'\n" "$vclip" >> "$OUT/concat/video.txt"
+  clist "$vclip" >> "$OUT/concat/video.txt"
 
   cdur=$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "$vclip" </dev/null)
   adur=$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "$VDIR/$afile" </dev/null)
@@ -238,7 +250,7 @@ tail -n +2 "$TL" | while IFS=$'\t' read -r seg ss se afile off freeze text; do
     echo "!! seg $i 段音频长 ${aout}s ≠ 窗口 ${cdur}s（时间轴会漂）。已中止。" >&2
     exit 3
   fi
-  printf "file '%s'\n" "$anorm" >> "$OUT/concat/audio.txt"
+  clist "$anorm" >> "$OUT/concat/audio.txt"
 
   # 源原声：按**同一 EDL**切出来、并用同样的 atrim/apad 夹到窗口长度，
   # 这样它与画面严格等长，后面才能真的分轨混音（而不是"大致对一下"）。
@@ -252,7 +264,7 @@ tail -n +2 "$TL" | while IFS=$'\t' read -r seg ss se afile off freeze text; do
       echo "!! seg $i 源原声段长 ${sout}s ≠ 窗口 ${cdur}s。已中止。" >&2
       exit 3
     fi
-    printf "file '%s'\n" "$snorm" >> "$OUT/concat/srcaudio.txt"
+    clist "$snorm" >> "$OUT/concat/srcaudio.txt"
   fi
 
   if [ "$WANT_ADOPT" -eq 1 ]; then

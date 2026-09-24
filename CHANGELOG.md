@@ -47,6 +47,39 @@ script. Closed with the smallest pieces that were already proven on a real 92-se
   source-audio mixing with silent-source refusal, and refusal to emit a "cut" with no subtitle text.
   No new runtime dependency: `subtitles.py` and `check_burned_subs.py` are standard library.
 
+### Round 4 follow-up — correctness and honesty fixes found by running the new path on real footage
+
+Running the new path on a real 26-second clip surfaced defects that the unit fixtures did not, so the
+same round was closed out with these:
+
+- **Phrase paging vs the delivery gate.** `check_timeline_audit.py` bound subtitles as **1 cue ↔ 1
+  narration row**, so a paged long line could never pass `ready`. The binding is now
+  "the row's cues concatenate to the row's script" **and** "their union equals the row's real audio
+  span (offset included)": paging is allowed, while a squeezed or holed line still fails
+  (out-of-order, out-of-span, overlapping, missing or extra text are all rejected).
+- **`make_cut.sh`** — one command for the delivery default: preflight, decide the source audio
+  (keep + duck when the source really has audio, record it and continue when it does not), force
+  `BURN_SUBS=1`, then the adopted-timeline audit. `build_sample.sh` keeps its historical defaults.
+- **`scripts/find_tools.py`** — `tools/voice/` is not inside the skill directory (the snapshot layout
+  is `<root>/skills/<name>/…` plus `<root>/tools/voice/…`). The locator prints the real path instead of
+  letting a host agent guess, and says not to hand-roll a bypass script.
+- **Subtitle input is no longer forgiving.** `parse_srt` fails loudly on a missing timecode, `end <=
+  start`, empty text, or non-monotonic cues (it used to `continue`, which is how "74 cues, 1 burned"
+  went unnoticed); CRLF is normalised and wrapped Latin lines keep their word boundaries.
+- **The burner escapes its filter argument.** `ass=<path>` broke the filtergraph for output paths
+  containing `,` `:` or `'`; the ASS actually handed to ffmpeg is now copied to a safe temporary path.
+  A missing `--labels` file is an error instead of a silent skip.
+- **`ffprobe` failure is no longer read as "no audio".** Both the assembler and the burner used to
+  treat an empty probe as a silent source and would drop the track; they now fail instead.
+- **The pixel checker stops over-claiming.** Out-of-band and margin pixels are judged against an
+  explicit noise tolerance (re-encoding produces some), `--min-text-px` must be > 0, band/protect/
+  late-sample are validated, and `px/字` is printed as a **diagnostic only** — a pixel diff can prove
+  something was drawn, never which characters. `not_a_verdict_on` now leads with text correctness.
+- **bash 3.2 + non-ASCII.** `$OUT，` (variable immediately followed by a CJK character) made the
+  draft notice itself die with `unbound variable`; braces are now used, and a test guards the notice.
+- Tests: 213 -> **222** offline cases (5 -> 8 subtitles, 13 -> 19 assembly).
+
+
 ## Unreleased — 2026-09-24
 
 **Production-path closure (review round 3).**

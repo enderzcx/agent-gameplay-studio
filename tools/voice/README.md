@@ -5,7 +5,8 @@ Small, independent pieces. None of them is a video editor, and none of them ship
 | File | Does | Needs |
 |---|---|---|
 | `tts_adapter.py` | **Optional external adapter.** Turns a segment spec into measured audio files, with a content-addressed cache | **Your** endpoint + key (`TTS_BASE_URL`, `TTS_API_KEY`) |
-| `build_sample.sh` | Assembles source ranges + narration into a playable cut, with paged subtitles; optionally burns them and mixes source audio | `ffmpeg`, a 7-column EDL, a voice directory |
+| `make_cut.sh` | **The delivery-default wrapper**: preflight -> decide source audio (keep+duck / record-and-continue) -> force `BURN_SUBS=1` -> adopted-timeline audit | `ffmpeg`, same inputs as below |
+| `build_sample.sh` | Assembles source ranges + narration into a playable cut, with paged subtitles; optionally burns them and mixes source audio (historical defaults unchanged) | `ffmpeg`, a 7-column EDL, a voice directory |
 | `subtitles.py` | Splits one narration span into phrase-sized cues; writes SRT and a **true-size** ASS (PlayRes = video size) | python3 only |
 | `burn_subs.py` | Burns an SRT into an MP4 with **libass** (`ass=` filter) | `ffmpeg` **with libass** |
 | `check_burned_subs.py` | Pixel-diffs the burned cut against the unburned one: is each cue really on screen, in-band, unclipped, off the protected UI band | `ffmpeg`, `ffprobe` |
@@ -187,8 +188,14 @@ cut**, and reports per cue: pixels inside the subtitle band, pixels outside it, 
 left/right safety margin (a clipped final character), and pixels inside the protected band (hand cards,
 key UI). It also reports the widest cue's pixels-per-character so a truncated tail shows up.
 
-It does **not** judge listening quality, whether the subtitle matches what was said, or whether the
-line breaks read well. It only says where the pixels are.
+Out-of-band and margin pixels are judged against an **explicit noise tolerance** (burn-in re-encodes
+the picture, so some out-of-band difference is expected); `--min-text-px` must be greater than zero,
+because a zero threshold would let a cut with no subtitles at all "pass".
+
+It does **not** judge listening quality, whether the subtitle matches what was said, whether the line
+breaks read well, **or which characters were drawn**. `px/字` is printed as a diagnostic only: a pixel
+difference can prove something was painted here, never that the right word (or its final character)
+is on screen. `not_a_verdict_on` says so in the report.
 
 ---
 

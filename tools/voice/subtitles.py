@@ -31,6 +31,59 @@ NO_BREAK_AFTER = ".0123456789"
 SRT_TS = re.compile(r"(\d+):(\d+):(\d+)[,.](\d+)\s*-->\s*(\d+):(\d+):(\d+)[,.](\d+)")
 
 
+def _fail(msg: str) -> "NoReturn":  # noqa: F821
+    """字幕/参数问题一律**明确失败**，不静默丢条、不静默夹值。"""
+    raise SystemExit(f"subtitle error: {msg}")
+
+
+def _need_positive_int(name: str, value) -> int:
+    try:
+        v = int(value)
+    except (TypeError, ValueError):
+        _fail(f"{name} 必须是整数：{value!r}")
+    if v <= 0:
+        _fail(f"{name} 必须 > 0：{v}")
+    return v
+
+
+def _need_nonneg_int(name: str, value) -> int:
+    try:
+        v = int(value)
+    except (TypeError, ValueError):
+        _fail(f"{name} 必须是整数：{value!r}")
+    if v < 0:
+        _fail(f"{name} 必须 >= 0：{v}")
+    return v
+
+
+def _ends_cjk(s: str) -> bool:
+    return bool(s) and _is_wide(s[-1])
+
+
+def _starts_cjk(s: str) -> bool:
+    return bool(s) and _is_wide(s[0])
+
+
+def join_wrapped_lines(lines: list[str]) -> str:
+    """把同一 cue 的多行合成一行：中文直接接，西文之间补一个空格。
+
+    直接 `"".join(lines)` 会把英文的 "hello" / "world" 粘成 "helloworld"（词边界丢失），
+    而中文补空格又会多出可见空隙 —— 所以按两侧字符决定。
+    """
+    out = ""
+    for raw in lines:
+        piece = raw.strip()
+        if not piece:
+            continue
+        if not out:
+            out = piece
+        elif _ends_cjk(out) or _starts_cjk(piece):
+            out += piece
+        else:
+            out += " " + piece
+    return out
+
+
 @dataclass
 class Cue:
     start: float
@@ -162,17 +215,34 @@ def write_srt(cues: list[Cue], path: Path) -> Path:
 
 
 def parse_srt(text: str) -> list[Cue]:
+    """读 SRT。**坏条不静默丢弃**：编号/时间码/顺序/时长任何一项不对都明确失败。
+
+    理由：字幕是这个流程的交付物之一。少读一条就等于"审了一条并不存在的字幕"，
+    而历史上正是这种静默 continue 让"74 条只烧进 1 条"没被任何检查发现。
+    """
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    blocks = [b for b in text.strip().split("\n\n") if b.strip()]
+    if not blocks:
+        _fail("SRT 文件里没有任何字幕块")
     out: list[Cue] = []
-    for block in [b for b in text.strip().split("\n\n") if b.strip()]:
+    for bi, block in enumerate(blocks, 1):
         lines = block.split("\n")
         m = SRT_TS.search(block)
         if not m:
-            continue
+            _fail(f"第 {bi} 块没有合法的时间码行：{lines[0][:60]!r}（拒绝静默跳过）")
+        ts_at = next((i for i, ln in enumerate(lines) if SRT_TS.search(ln)), None)
         g = [int(x) for x in m.groups()]
         st = g[0] * 3600 + g[1] * 60 + g[2] + g[3] / 1000
         en = g[4] * 3600 + g[5] * 60 + g[6] + g[7] / 1000
-        body = "\n".join(lines[2:]) if len(lines) > 2 else ""
-        out.append(Cue(st, en, body.replace("\n", "")))
+        if en <= st:
+            _fail(f"第 {bi} 块 end <= start（{st:.3f} → {en:.3f}）：时间码是坏的")
+        body = join_wrapped_lines(lines[ts_at + 1:]) if ts_at is not None else ""
+        if not body.strip():
+            _fail(f"第 {bi} 块没有任何字幕文本（空条不算字幕）")
+        out.append(Cue(st, en, body))
+    starts = [c.start for c in out]
+    if starts != sorted(starts):
+        _fail("SRT 的时间码不是递增的：顺序错乱会让逐条核准错对象")
     return out
 
 
@@ -218,24 +288,47 @@ def write_ass(cues: list[Cue], path: Path, w: int, h: int, *,
 
 def parse_cues_tsv(path: Path) -> list[Cue]:
     """cues.tsv：start_ms <TAB> end_ms <TAB> text（text 内的 TAB 视作空格）。"""
-    cues = []
+    if not path.is_file():
+        _fail(f"找不到 cues 文件: {path}")
+    cues: list[Cue] = []
     for n, ln in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         if not ln.strip() or ln.startswith("#"):
             continue
         c = ln.split("\t")
         if len(c) < 3:
-            raise SystemExit(f"cues.tsv 第 {n} 行列数 {len(c)} < 3：{ln[:80]}")
-        cues.append(Cue(int(c[0]) / 1000.0, int(c[1]) / 1000.0, "\t".join(c[2:]).strip()))
+            _fail(f"cues.tsv 第 {n} 行列数 {len(c)} < 3：{ln[:80]!r}")
+        try:
+            ms, me = int(c[0]), int(c[1])
+        except ValueError:
+            _fail(f"cues.tsv 第 {n} 行的时间不是整数毫秒：{c[0]!r} / {c[1]!r}")
+        if ms < 0 or me <= ms:
+            _fail(f"cues.tsv 第 {n} 行时间区间非法（{ms} → {me} ms）")
+        text = "\t".join(c[2:]).strip()
+        if not text:
+            _fail(f"cues.tsv 第 {n} 行没有字幕文本")
+        cues.append(Cue(ms / 1000.0, me / 1000.0, text))
+    if not cues:
+        _fail("cues.tsv 里没有任何 cue")
     return cues
 
 
 def parse_labels_tsv(path: Path) -> list[Cue]:
+    if not path.is_file():
+        _fail(f"找不到标注文件: {path}")
     out = []
-    for ln in path.read_text(encoding="utf-8").splitlines():
+    for n, ln in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         if not ln.strip():
             continue
-        a, b, txt = (ln.split("\t") + ["", ""])[:3]
-        out.append(Cue(float(a), float(b), txt))
+        parts = ln.split("\t")
+        if len(parts) < 3:
+            _fail(f"标注 TSV 第 {n} 行列数 {len(parts)} < 3（需要 start<TAB>end<TAB>text）")
+        try:
+            a, b = float(parts[0]), float(parts[1])
+        except ValueError:
+            _fail(f"标注 TSV 第 {n} 行时间不是数字：{parts[0]!r} / {parts[1]!r}")
+        if not (a < b):
+            _fail(f"标注 TSV 第 {n} 行时间区间非法（{a} → {b}）")
+        out.append(Cue(a, b, parts[2]))
     return out
 
 
@@ -254,6 +347,14 @@ def max_chars_default(w: int, size: int, margin_lr: int) -> int:
 # --------------------------------------------------------------------------- CLI
 
 def cmd_build(a) -> int:
+    _need_positive_int("--w", a.w)
+    _need_positive_int("--h", a.h)
+    _need_positive_int("--size", a.size)
+    _need_nonneg_int("--margin-v", a.margin_v)
+    _need_nonneg_int("--margin-lr", a.margin_lr)
+    _need_nonneg_int("--max-chars", a.max_chars)
+    if 2 * a.margin_lr >= a.w:
+        _fail(f"左右边距 {a.margin_lr}px × 2 已经吃满画面宽度 {a.w}px：没有可排字的区域")
     raw = parse_cues_tsv(Path(a.cues))
     lr = effective_margin_lr(a.w, a.margin_lr)
     limit = a.max_chars or max_chars_default(a.w, a.size, a.margin_lr)
@@ -263,8 +364,10 @@ def cmd_build(a) -> int:
             cues.append(c)
         else:
             cues.extend(page_text(c.text, c.start, c.end, limit))
+    if not cues:
+        _fail("分页后没有任何 cue")
     write_srt(cues, Path(a.srt))
-    labels = parse_labels_tsv(Path(a.labels)) if a.labels and Path(a.labels).is_file() else None
+    labels = parse_labels_tsv(Path(a.labels)) if a.labels else None
     write_ass(cues, Path(a.ass), a.w, a.h, font=a.font, size=a.size,
               margin_v=a.margin_v, margin_lr=lr, labels=labels)
     longest = max((visible_len(c.text) for c in cues), default=0)

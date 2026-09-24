@@ -473,7 +473,7 @@ def test_audit_content_binding(root: Path, media: dict, pre: Path) -> None:
     shifted = write_srt(root / "subs-shifted.srt", shifted_cues)
     expect("audit: a same-count subtitle whose timings moved out of its audio span is rejected",
            1, AUDIT, bound("timeline.audit.ok.tsv", root / "shifted", shifted, media["voice"],
-                           media["final"], pre), substr="字幕起止没有贴合")
+                           media["final"], pre), substr="严丝合缝")
 
     # the exact hole the reviewer described: the whole sentence squeezed into the last 0.1 s
     squeezed = write_srt(root / "subs-squeezed.srt",
@@ -481,7 +481,7 @@ def test_audit_content_binding(root: Path, media: dict, pre: Path) -> None:
                           for s, e, t in good_cues()])
     expect("audit: a whole line squeezed into the last 0.1 s of its span is rejected", 1, AUDIT,
            bound("timeline.audit.ok.tsv", root / "squeezed", squeezed, media["voice"],
-                 media["final"], pre), substr="字幕起止没有贴合")
+                 media["final"], pre), substr="严丝合缝")
 
     other_voice = root / "voice-replaced.wav"
     sh(["ffmpeg", "-nostdin", "-v", "error", "-y", "-f", "lavfi",

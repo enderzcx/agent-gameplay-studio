@@ -56,17 +56,36 @@ Agent 收到后**自己决定**下面全部内容，不要回头问可以自己�
 7. 审听（音轨）与审片（成片）→ §8
 8. 验收怎么说才算诚实 → §9
 
-**只有这四件事必须回来问用户**：改稿方向（说什么、什么口吻）、是否公开发布或上传媒体、
-是否消耗付费额度、以及素材里**无法判断的事实**（例如"这张牌你当时为什么选"）。
+**只有这四种情况才停下来问用户**：
+
+1. 这一步**没有被授权**（公开发布、上传媒体、消耗付费额度、改共享环境或生产配置）；
+2. 需要**扩大范围**（换游戏、加平台、引入新依赖或新账号）；
+3. **不可逆**或影响交付物之外的东西（覆盖母带、删别人的产物、改别的项目）；
+4. 确实影响交付的**业务选择**（口吻与口径、给谁看、目标时长、要不要点名）。
+
+除此之外**不要停**：本机已授权的模型/TTS/剪辑调用、用户已经给过的风格、工程默认值（帧率、分辨率、
+响度目标、目录结构），都自己接着做。
+
+两条容易搞反的：
+
+- **"当时你为什么这么选"不要问用户。** 素材里没有就如实写 `未记录`，事后的判断写进
+  `retrospective_commentary`，与 `stated_reason` 分列。为一句话去打断用户，是把工作推回去。
+- **缺一个条件不等于全部停摆。** 源片无原声、采集稀疏、某个通道不可用 —— 记下限制，
+  继续做不依赖它的步骤（时间线、字幕、审片单都能做），只在"这一步本身做不了"时标 `blocked`。
+- **试音只是量时长**：稿子没改就不必重新合成（内容寻址缓存本来就会复用同一个节点）。
 
 ---
 
 ## 2. 开工前 60 秒：先证明这件事做得成
 
 ```bash
-S=<skill 安装路径>          # 例如 ~/.agents/skills/gameplay-postproduction
+# 检查器在 skill 目录里；组装器/字幕/像素抽检在**仓库或快照根**的 tools/voice 下
+# （快照布局：<root>/skills/gameplay-postproduction/… + <root>/tools/voice/…；两者不是父子关系）
+S=<skill 安装路径>            # 例如 ~/.agents/skills/gameplay-postproduction
+R=<仓库或快照根>              # 例如 ~/.local/share/agent-gameplay-studio/<merge_sha>
 A="$S/scripts/check_timeline_audit.py"
 C="$S/scripts/check_postproduction.py"
+V="$R/tools/voice"
 
 # ① 源台账：音轨存在性 / 采集密度 / 摘要 / 时长（真 ffprobe，不出网）
 python3 "$A" preflight --json --out preflight.json rec-win=/abs/rec-win.mp4 rec-both=/abs/rec-both.mp4
@@ -101,28 +120,50 @@ python3 -c "import sys;print(sys.version)"                                      
 | **审听**（配音念对没有、断句难不难受） | **独立无字幕音轨**，画面给纯色或黑 | 带画面的"审听"会把"看来的"当"听来的"（实测发生过） |
 | **审片**（字幕/遮挡/节奏） | **最终实际导出的 MP4** | 审中间产物等于没审交付物 |
 
-本机实测的调用形状（`gemini-companion` 0.1.3 CLI；换成你自己的通道同样成立）：
+本机实测的调用形状（`gemini-companion` 0.1.3 CLI；换成你自己的通道同样成立）。
+**通道 CLI 的路径是本机配置，不是本仓库的东西**：作者本机把它记在宿主侧的适配说明里
+（`HOST-LOCAL-ADAPTER.md`，不进公开仓库）。公开示例一律写成可配置变量：
 
 ```bash
-GCB=<你的视频理解通道 CLI>          # 作者本机：gemini-companion 的 gcb.py
-JOBS=<项目目录>/.multimodal-jobs
+GCB="${GCB:-<你的视频理解通道 CLI>}"     # 本机：gemini-companion 的 gcb.py（版本号按实际安装）
+JOBS="$PWD/.multimodal-jobs"
 
 # ① 结构：给区间，别给整片
 python3 "$GCB" video --path /abs/rec.mp4 --start 150 --end 200 --kind game \
   --question "只描述发生顺序与画面阶段，不要读牌名与数值" \
-  --backend beefapi --beefapi-model gemini-3.8-flash --jobs-dir "$JOBS" --json
+  --jobs-dir "$JOBS" --json
 
 # ② 细节：先切高清短片再问（模型对全片的牌面读数不可靠）
 ffmpeg -nostdin -v error -y -ss 318 -to 322 -i /abs/rec.mp4 \
   -vf "crop=660:360:110:300,scale=1320:-2" -an -c:v libx264 -crf 16 /tmp/detail.mp4
 python3 "$GCB" video --path /tmp/detail.mp4 --kind game \
-  --question "读出这三张候选牌的名字与效果文字" --backend beefapi --json
+  --question "读出这三张候选牌的名字与效果文字" --json
 
-# ③ 审听：只给音轨，画面不要给内容
-ffmpeg -nostdin -v error -y -i final.mp4 -vn -c:a pcm_s16le voice.wav
-python3 "$GCB" ask --task-text "听这段音频，逐句转写，并标出念错/重复/断句别扭的地方" \
-  --backend beefapi --json
+# ③ 审听：只给**声音**，画面不要给内容。两种都实测过，任选：
+#    (a) 直接送音频（要显式给 MIME，并且用 --kind generic：review 模式强制 JSON，模型常常给不出）
+python3 "$GCB" video --path /abs/voice_master.wav --beefapi-media-mime audio/wav \
+  --kind generic --question "逐句转写这段音频，并指出念错/重复/断句别扭的位置；不要输出 JSON" --json
+#    (b) 黑屏 + 同一条音轨的 MP4（老通道不吃裸音频时的稳妥做法）
+ffmpeg -nostdin -v error -y -f lavfi -i "color=c=black:s=960x966:r=10" -i /abs/voice_master.wav \
+  -c:v libx264 -crf 28 -pix_fmt yuv420p -c:a aac -shortest /abs/audit-audio-only.mp4
+python3 "$GCB" video --path /abs/audit-audio-only.mp4 --kind generic \
+  --question "画面全黑，只依据听到的内容逐句转写，并指出念错/重复/断句别扭的位置" --json
+
+# ④ 审片：最终实际导出的 MP4
+python3 "$GCB" video --path /abs/out/final.mp4 --kind generic \
+  --question "字幕是否全程可见/被裁/挡手牌？旁白与画面阶段是否一致？有无明显音画不同步？" --json
 ```
+
+**别用纯文本命令假装在听音频**：本机这个通道的 `ask` 子命令**没有任何媒体入参**
+（只有文本 + 模型参数），"听这段音频"必须是 ③ 里的 `video --path` 形式。
+
+两条实测口径：
+
+- **`--kind review` 强制模型输出 JSON**，模型经常给不出 → `failure_kind=contract`
+  （"正文未包含可解析的 JSON 对象"）。审听/审片这类开放式问题用 `--kind generic` 更稳；
+  真需要结构化结论时再收紧，并把"这一次是格式失败、不是内容失败"如实写出来。
+- **就算是纯音频输入，模型也可能编造画面描述**（实测：给 `.wav` 却回报"卡牌文字看不清"）。
+  只采信转写与听感相关的部分，其余一律标"不可靠"，需要画面就另外给画面。
 
 **后备通道怎么写才算诚实**：
 
@@ -172,7 +213,7 @@ python3 "$GCB" ask --task-text "听这段音频，逐句转写，并标出念错
 ffmpeg 的 `ass=` 滤镜烧录。中间**没有临时 PNG、没有 Pillow 依赖**。
 
 ```bash
-V=<repo 或 skill 安装路径>/tools/voice
+V=<仓库或快照根>/tools/voice        # 见 §2 的路径约定
 
 # 组装（见 §7 的完整调用）会自动做这一步；单独重做字幕时：
 python3 "$V/subtitles.py" build \
@@ -192,34 +233,53 @@ python3 "$V/subtitles.py" build \
 ```bash
 python3 "$V/check_burned_subs.py" \
   --video out/final.mp4 --baseline out/final-nosub.mp4 --subs out/subs.srt \
-  --band 900:966 --protect 655:845 --margin-x 40 --json out/subs-check.json
+  --band 900:966 --protect 655:845 --margin-x 40 --out-band-tolerance 60 \
+  --json out/subs-check.json
 ```
 
-它做逐像素差分（`--baseline` 是同一制作流程产出的**未烧字幕版**，所以"字"和"本来就白的东西"能分开），
-逐条回答四个问题：**这条真的烧上了吗 / 有没有越出字幕带 / 有没有碰到左右边距（末字被裁）/
-有没有压到保护带（手牌等 UI）**。
+它做逐像素差分（`--baseline` 是同一制作流程产出的**未烧字幕版**），逐条报数：
+字幕带内测到多少差分像素 / 带外多少 / 进了左右安全边距多少 / 落进保护带多少。
 
-> 它**不证明**听感、字幕与语音的语义一致性、断句是否舒服。机器只说"这些像素在不在带里"。
+**这个检查器证明什么、不证明什么，必须原样照说**：
+
+- **证明**：在**被采样的那些时刻**，字幕带里确实出现了由烧录引入的绘制；这些绘制没有越过声明的
+  左右安全边距、也没有落进声明的保护带（都以显式噪声容限为准）。
+- **不证明**：**画的是什么字、有没有漏字、长句末字有没有被吞**。差分只能说明"这里被绘制过"，
+  说明不了内容。所以 `px/字` 只作为**诊断**打印，不构成判定（`--min-text-px` 必须 > 0，
+  否则一部没有字幕的片子也会"通过"）。
+- **重编码噪声**：烧字幕会重编码，带外本来就会产生少量差分。任何一个带外像素都判"字幕越界"是错的，
+  所以噪声容限是**显式参数**（默认取该采样点带内像素的 5%，至少 50px），超出才判失败，
+  观测值一并写进报告 —— 不要为了让灯变绿随手把它调大。
+- 未被采样的时刻、听感、语义一致性、断句质量，全部不在这个检查器里。
 
 ---
 
-## 7. 原声：有就分轨，没有就写明
+## 7. 原声与组装：一次调用走完默认路径
+
+**优先用封装好的那一个入口**（它把交付默认值定死，不需要调用方自己拼）：
 
 ```bash
-# 默认：成片音轨 = 旁白（源原声不参与，因为很多录屏本来就是静音采集）
-SRC_VIDEO=/abs/rec.mp4 bash tools/voice/build_sample.sh edl.tsv voice_dir out_dir
+V=<仓库或快照根>/tools/voice
 
-# 源片真的有原声、且要保留时：
-SRC_VIDEO=/abs/rec-with-audio.mp4 KEEP_SRC_AUDIO=1 SRC_AUDIO_GAIN=-8 SRC_AUDIO_DUCK=1 \
-  TIMELINE=recipe.tsv PREFLIGHT=preflight.json SILENCE_LEDGER=gaps.tsv BURN_SUBS=1 \
-  bash tools/voice/build_sample.sh edl.tsv voice_dir out_dir
+SRC_VIDEO=/abs/rec.mp4 TIMELINE=recipe.tsv PREFLIGHT=preflight.json SILENCE_LEDGER=gaps.tsv \
+  bash "$V/make_cut.sh" edl.tsv voice_dir out_dir
 ```
 
-- `KEEP_SRC_AUDIO=1` 时，脚本按**同一 EDL** 把源音轨切出来、夹到与画面等长，再与旁白**分轨混音**；
-  `SRC_AUDIO_DUCK=1` 用旁白当 sidechain，说话时把原声压下去（`src_audio.wav` 与 `voice_master.wav`
-  都保留，终混不覆盖母版）。
-- **源片没有音轨时，`KEEP_SRC_AUDIO=1` 直接失败**（退出 3 + `DRAFT.txt`），不会给你一条静音轨冒充原声。
-- 源片**确实无声**时：如实写"源无音轨，成片音轨来自旁白"，**不要**编造游戏原声、不要拿别的素材凑。
+`make_cut.sh` 做四件事，顺序固定：
+
+1. 先 `preflight`（音轨存在性 / 静默 / 采集密度）——**探测不出来就停**，不往下渲染；
+2. 源片**确实有原声** → 默认保留并与旁白**分轨混音**（`SRC_AUDIO_GAIN`/`SRC_AUDIO_DUCK`）；
+   显式 `SRC_AUDIO=drop` 才丢；源片**确实无声** → 写进 `out/SOURCE-AUDIO.txt` 并**继续**；
+3. 强制 `BURN_SUBS=1`：**交付物是带字幕的那一版**（未烧版留成 `final-nosub.mp4` 供像素抽检对照）；
+4. 走 adopted-timeline 审计；审计不过就标 `DRAFT.txt`，**不算完成**。
+
+底层 `build_sample.sh` 的历史默认（不烧字幕、只要旁白）保持不变——它是个组装器，不是交付策略。
+想让"完成"成立，就不要直接用它拼一个没有字幕、又丢了原声的 draft 然后说做完。
+
+- `KEEP_SRC_AUDIO=1` 时，脚本按**同一 EDL** 把源音轨切出来、夹到与画面等长，再与旁白混音；
+  `src_audio.wav` 与 `voice_master.wav` 都保留，终混不覆盖母版。
+- **源片确实没有音轨时，`KEEP_SRC_AUDIO=1` 直接失败**（退出 3 + `DRAFT.txt`），
+  不会给你一条静音轨冒充原声；**探测失败**是另一种错（无法判断），也直接失败，不当作"无声"。
 
 ---
 

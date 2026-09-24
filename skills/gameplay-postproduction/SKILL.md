@@ -82,6 +82,7 @@ python3 "$REPO/skills/$SKILL/scripts/check_postproduction.py" --help
 | 产物形状 | `templates/asset-register.md`、`commentary-unit.md`、`timeline.md`、`silence-ledger.md`、`review-sheet.md` |
 | 机器校验（结构/就绪） | `scripts/check_postproduction.py` |
 | 输入预检 + 采用时间线语义审计 | `scripts/check_timeline_audit.py`（锚点交叉核对/阶段声明/保持帧/按实际声段的静默依据/内容级版本绑定 + 制作 receipt/stale 台账，规则见 canonical §1.1、§4.1–4.5） |
+| **组装/字幕/像素抽检的 `tools/voice/` 在哪** | `python3 scripts/find_tools.py`（它不在本 skill 目录下，见下） |
 
 只在需要时读对应文件，不要把全部 references 一次加载。
 
@@ -167,6 +168,14 @@ python3 "$REPO/skills/$SKILL/scripts/check_postproduction.py" --help
 **停止条件**：修复**尽量局部**；仍无法确认的事实**如实挂起**（写进问题单的 `unknown`），**不无限循环**。
 
 ## Checker
+
+**先定位工具**：组装器/字幕/像素抽检在**仓库或快照根**的 `tools/voice/`，**不是**本 skill 目录的子目录
+（标准快照布局是 `<root>/skills/gameplay-postproduction/…` + `<root>/tools/voice/…`）。
+不要猜路径，也不要因为找不到就自己手写一套脚本（那会绕过 adopted-timeline 审计）：
+
+```bash
+python3 "$S/scripts/find_tools.py" --check     # 打印 tools/voice 绝对路径；找不到就非 0 退出并说明怎么装
+```
 
 默认用**仓库相对路径**（不依赖任何人的家目录）。若已按上面的「安装 / 装载」装载，把 `S` 换成你的安装路径即可：
 
