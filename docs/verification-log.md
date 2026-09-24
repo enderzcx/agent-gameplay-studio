@@ -14,7 +14,7 @@ only** and talks to it over loopback. No packet leaves the machine and no remote
 
 ## 1. Offline test suite at 0.1.0 — 74 cases
 
-> Historical record for the published 0.1.0 revision. The suite is now **142** cases; see §9.
+> Historical record for the published 0.1.0 revision. The suite is now **184** cases; see §9.
 
 ```
 $ make check
@@ -328,13 +328,13 @@ success.
 
 ## 9. Workflow hardening (2026-09-24) — what was actually run
 
-The suite grew from 74 to **142 offline cases**; the numbers below are the raw tail of each run.
+The suite grew from 74 to **184 offline cases**; the numbers below are the raw tail of each run.
 
 ```
 $ python3 tests/test_check_postproduction.py
-  ... 26 passed, 0 failed
+  ... 32 passed, 0 failed
 $ python3 tests/test_timeline_audit.py
-  ... 58 passed, 0 failed
+  ... 94 passed, 0 failed
 $ python3 tests/test_build_sample.py
   全部通过（7 项）
 $ python3 tests/test_tts_guarantees.py
@@ -360,6 +360,18 @@ missing final cut; each media parameter omitted in turn; a missing, stale, self-
 non-finite silence ledger; `--tol nan`, `--tol -1`, `--silence-threshold nan`, `--silence-threshold
 -5`, `--min-fps inf` as usage errors; a tampered preflight digest (stale manifest); a removed source
 file; and a non-media file that cannot be probed (`status: undetermined`).
+
+**Second review round (same day).** An independent read-back found concrete defects that are now
+fixed and covered: silence was computed from picture windows instead of the real audio spans; the
+per-cue subtitle text/timing was not compared in the revision the reviewer read; `--audio` was not
+checked for an actual audio stream; `ready` neither received the final cut for a same-length
+comparison nor validated `--silence-threshold`, and it dropped the audit's warnings/`unverified`;
+`-show_entries` used `&` instead of `:` and silently lost the `format` block; `measure_audio_signal`
+ignored a non-zero `ffmpeg` exit; `source_path` was stored as given, so changing cwd could misjudge
+it; the global phase order was treated as a timeline; and four matching digests did not prove the
+artifacts came from one production. Each has a regression case, including a receipt bound to a
+different timeline, a 1 s line on a 66 s shot (65 s of silence, ratio 1/66), an `--audio` file with
+no audio stream, and a 5 s sheet+MP4 paired with a valid 66 s timeline/audio.
 
 **The authoring path is covered too.** `test_build_sample.py` builds a real cut through
 `build_sample.sh`: without the audit inputs the output is stamped `DRAFT.txt` and the script says so

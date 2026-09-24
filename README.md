@@ -24,7 +24,7 @@ parts that need judgement stay yours, and the parts that must not be fudged are 
   at the app level, and compiles from source — no signed binary is shipped.
 - **Voice and assembly tools** (`tools/voice/`) — an optional TTS adapter, an EDL assembler that
   refuses to export a mistimed cut, and a subtitle burner for ffmpeg builds without libass.
-- **142 offline tests** that need no network, no keys and no game.
+- **184 offline tests** that need no network, no keys and no game.
 
 New here? Go to [Quick start](#quick-start-shortest-path-that-actually-works), then
 [Using the skill](#using-the-skill), then read
@@ -76,7 +76,8 @@ skipped on the delivery path:
 
 ```bash
 python3 "$A" audit timeline.tsv --preflight preflight.json --silence-ledger gaps.tsv \
-    --subtitle subs.srt --audio voice_master.wav --final-mp4 final.mp4 --report-out audit-report.json
+    --subtitle subs.srt --audio voice_master.wav --final-mp4 final.mp4 \
+    --receipt produce-receipt.json --report-out audit-report.json
 python3 "$C" ready review-sheet.md --final-mp4 /abs/path/to/final.mp4 \
     --timeline timeline.tsv --preflight preflight.json \
     --silence-ledger gaps.tsv --subtitle subs.srt --audio voice_master.wav
@@ -172,10 +173,10 @@ evidence is in this repo; "unverified" means nobody has shown it works.
 | **Ready-made GUI / one-click render** | **Does not exist — by design** | This is a skill plus scripts. You bring the editor. |
 | **Bundled model, key, endpoint or quota** | **None** | Installing this grants no model capability; the TTS adapter does nothing until you point it at your own endpoint. |
 | Python 3.9 compatibility | **Verified** | The whole offline suite was run on Python **3.9.6** (`/usr/bin/python3`), not only on a newer interpreter. |
-| Postproduction artifacts (timeline / units / review sheet) | **Verified — offline** | `tests/test_check_postproduction.py`: 26 cases, no network, no model |
+| Postproduction artifacts (timeline / units / review sheet) | **Verified — offline** | `tests/test_check_postproduction.py`: 32 cases, no network, no model |
 | Deterministic checker (structure + `ready` gate) | **Verified — offline** | Same suite; `ready` independently probes the media with `ffprobe` and refuses to pass without the audit inputs |
 | Input preflight (audio `present`/`silent`/`absent`, sampling `normal`/`sparse`) | **Verified — offline** | `tests/test_timeline_audit.py`: real ffmpeg/ffprobe on lavfi-generated media, including the `undetermined` failure path |
-| Adopted-timeline audit (phase anchors, labelled holds, visible window, silence ledger, version binding, stale manifest) | **Verified — offline** | Same suite: 58 cases over anonymous synthetic fixtures, each defect reproduced by a committed fixture (anchors, content binding, numeric rejection) |
+| Adopted-timeline audit (phase anchors, labelled holds, visible window, silence ledger, version binding, stale manifest) | **Verified — offline** | Same suite: 94 cases over anonymous synthetic fixtures, each defect reproduced by a committed fixture (anchors, phase declaration, audio-span silence, content binding, receipt, numeric rejection) |
 | Perceived delivery, factual semantics, "is this cut any good" | **Not judged — by design** | `audit` reports a `not_a_verdict_on` list; only a human listening/watching plus source-frame checks can settle these |
 | EDL assembly with synthetic media (real `ffmpeg`) | **Verified — offline** | `tests/test_build_sample.py`: 7 cases, lavfi fixtures, incl. the draft/audit path |
 | TTS adapter hard guarantees (no rewrite, empty/unmeasurable audio fails, no dud cache, per-node re-render) | **Verified — offline** | `tests/test_tts_guarantees.py`: 51 cases against a loopback fake endpoint |

@@ -35,7 +35,8 @@ rec-01 | ev-008 | 478.5-496.0 | 8.5-26.0 | 20.8-41.3 | 1x + 定格3s | 这里选
 | 列 | 必需 | 说明 |
 |---|---|---|
 | `event_phase` | 是 | 该行**画面**所处阶段：`setup`/`battle`/`reward`/`map`/`shop`/`rest`/`event`/`other` |
-| `claim_phase` | 旁白行 | 该行**旁白主张**针对的阶段（同枚举）。**不得晚于 `event_phase`** —— 晚于就是「战斗还没打完就在说打完了、我拿了 X」；早于属事后回顾，允许 |
+| `claim_phase` | 旁白行 | 该行**旁白主张**针对的阶段（同枚举） |
+| `claim_mode` | 旁白行 | `live`（主张阶段与画面一致）或 `retrospective`（跨阶段事后回顾）。**跨 phase 必须写 `retrospective`**，否则失败；同一事件上「画面还没到那个阶段就在讲结果」即使写了 `retrospective` 也失败 |
 | `anchor_asset` | 旁白行 | 旁白讲的**素材**。必须等于本行 `asset_id`（跨素材锚点机器无法核验，会直接失败） |
 | `anchor_event` | 旁白行 | 旁白讲的**回合**，`+` 连接。必须是本行 `event_id` 的子集 —— 单事件镜头不许把旁白挂到别的事件上；真要跨回合，就把 `event_id` 写成 `a+b` |
 | `anchor_source` | 旁白行 | 旁白引用的**源区间** `起-止`。必须落在本行 `source_range` 之内（说的那一刻要在画面上）；**跨回合镜头**（`event_id` 含 `+`）还要求它覆盖整个镜头跨度 |
@@ -49,6 +50,14 @@ rec-01 | ev-008 | 478.5-496.0 | 8.5-26.0 | 20.8-41.3 | 1x + 定格3s | 这里选
 **为什么三个 hash 是必需的**：只数字幕段数、音轨时长或只 hash 输入原片，都挡不住
 「同样 74 段但改了词/改了时间的 SRT」和「上一版音轨/旧 MP4」。审计会把这三份产物的
 **内容摘要**与这一份时间线绑定，并逐条核对字幕**文本与时点**。
+
+**关于全局 phase 顺序**：`setup < battle < reward < map < shop < rest < event < other` 只是枚举顺序，
+**不是**时间轴——循环类游戏里 map/shop/rest/battle 会反复出现。所以跨阶段句一律要显式声明
+`claim_mode=retrospective`，机器只在**同一事件内部**判「提前讲结果」。
+
+**关于成片与 receipt**：`--final-mp4` 必须与时间线**同版同长**（内容摘要 + 时长都要对得上），
+并且要有一份 `produce-receipt.json`（制作路径在产出那一刻写出，把这份 timeline 与
+字幕/音轨/成片绑在同一次制作上）。只读旧媒体再手写一份声明，不算验证。
 
 **这些锚点是"声明"，不是"证明"**：机器只核对它们与本行真实画面源区间是否自洽，
 不核对「这句话确实在讲那个回合」。报告里的 `human_annotations_not_machine_verified` 会把这条边界写出来。
@@ -64,7 +73,7 @@ python3 "$S/check_timeline_audit.py" preflight --json --out preflight.json rec-w
 python3 "$S/check_timeline_audit.py" audit "timeline.tsv" \
     --preflight preflight.json --silence-ledger gaps.tsv \
     --subtitle subs.srt --audio voice_master.wav --final-mp4 final.mp4 \
-    --json --report-out audit-report.json
+    --receipt produce-receipt.json --json --report-out audit-report.json
 ```
 
 结构检查器验证：列齐全、区间可解析、`clip` 长度 == `source` 长度、

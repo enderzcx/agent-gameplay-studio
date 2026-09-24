@@ -22,8 +22,10 @@
 # 环境变量（**没有私有默认值**，源视频必须显式给）：
 #   SRC_VIDEO   源录屏文件（必需）
 #   TIMELINE / PREFLIGHT / SILENCE_LEDGER   可选：给了就在导出后**现场跑采用时间线审计**
-#               （与 `ready` 门槛同一个 checker、同一套规则）。审计不过 → 退出 3，并写出
-#               `DRAFT.txt`；没给 → 产物一律标为 **DRAFT（不可交付）**，见文件末尾。
+#               （与 `ready` 门槛同一个 checker、同一套规则），并在制作完成的这一刻写出
+#               `produce-receipt.json`（把 timeline 与字幕/音轨/成片绑在同一制作上）。
+#               审计不过 → 退出 3，并写出 `DRAFT.txt`；没给 → 产物一律标为
+#               **DRAFT（不可交付）**，见文件末尾。
 #   SRC_CROP    源画面的裁剪/缩放滤镜链，默认 scale=960:-2（等宽等比）。
 #               若源片里混入了带答案的辅助面板，必须在这里显式裁掉。
 #   OUT_FPS     输出帧率，默认 30（降采样，不补帧）
@@ -211,10 +213,38 @@ AUDIT="$HERE/../../skills/gameplay-postproduction/scripts/check_timeline_audit.p
 SUBS_FILE="${SUBS:-$OUT/subs.srt}"
 if [ -n "${TIMELINE:-}" ] && [ -n "${PREFLIGHT:-}" ] && [ -n "${SILENCE_LEDGER:-}" ] \
    && [ -f "$AUDIT" ]; then
+  # 制作 receipt：**在制作完成的这一刻**把 timeline 与三份产物绑在一起。
+  # 没有它，"拿旧成片 + 新写一份声称旧 hash 的时间线"就能自称语义正确。
+  python3 - "$OUT" "$TIMELINE" "$PREFLIGHT" "$SUBS_FILE" "$TL" "$SRC" <<'RECEIPTEOF'
+import hashlib, json, pathlib, sys, datetime
+out, timeline, preflight, subs, edl, src = (pathlib.Path(sys.argv[1]), *map(pathlib.Path, sys.argv[2:]))
+sha = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
+try:
+    assets = (json.loads(preflight.read_text(encoding="utf-8")).get("assets") or {})
+except Exception:
+    assets = {}
+rec = {
+    "schema": "gameplay-postproduction/produce-receipt/1",
+    "produced_by": "tools/voice/build_sample.sh",
+    "produced_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "timeline": {"path": str(timeline), "sha256": sha(timeline) if timeline.is_file() else None},
+    "edl": {"path": str(edl), "sha256": sha(edl) if edl.is_file() else None},
+    "source_video": {"path": str(src), "sha256": sha(src) if src.is_file() else None},
+    "sources": {k: v.get("sha256") for k, v in assets.items()},
+    "subtitle": {"path": str(subs), "sha256": sha(subs) if subs.is_file() else None},
+    "audio": {"path": str(out / "voice_master.wav"),
+              "sha256": sha(out / "voice_master.wav") if (out / "voice_master.wav").is_file() else None},
+    "final": {"path": str(out / "final.mp4"),
+              "sha256": sha(out / "final.mp4") if (out / "final.mp4").is_file() else None},
+}
+(out / "produce-receipt.json").write_text(json.dumps(rec, ensure_ascii=False, indent=2), encoding="utf-8")
+print(f"receipt: {out / 'produce-receipt.json'}")
+RECEIPTEOF
   echo "--- 采用时间线审计（$TIMELINE）---"
   if python3 "$AUDIT" audit "$TIMELINE" --preflight "$PREFLIGHT" \
        --silence-ledger "$SILENCE_LEDGER" --subtitle "$SUBS_FILE" \
        --audio "$OUT/voice_master.wav" --final-mp4 "$OUT/final.mp4" \
+       --receipt "$OUT/produce-receipt.json" \
        --report-out "$OUT/audit-report.json"; then
     rm -f "$OUT/DRAFT.txt"
     echo "审计通过：$OUT/audit-report.json（≠ 审片通过；听感与事实语义仍需人核）"
@@ -240,7 +270,8 @@ Make it deliverable:
   # then the delivery gate (same audit, plus the review sheet):
   python3 <repo>/skills/gameplay-postproduction/scripts/check_postproduction.py ready sheet.md \
       --final-mp4 <out_dir>/final.mp4 --timeline timeline.tsv --preflight preflight.json \
-      --silence-ledger gaps.tsv --subtitle <out_dir>/subs.srt --audio <out_dir>/voice_master.wav
+      --silence-ledger gaps.tsv --subtitle <out_dir>/subs.srt --audio <out_dir>/voice_master.wav \
+      --receipt <out_dir>/produce-receipt.json
 DRAFTEOF
   echo "!! DRAFT ONLY：没有同时提供 TIMELINE / PREFLIGHT / SILENCE_LEDGER，" >&2
   echo "   本产物**未过采用时间线审计**，已写出 $OUT/DRAFT.txt；交付前必须过 ready 门槛。" >&2

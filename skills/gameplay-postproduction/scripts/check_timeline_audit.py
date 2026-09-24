@@ -6,24 +6,26 @@
     preflight（输入预检）  <asset_id>=<path> [...]
         对每个源素材独立探测：sha256 / size / duration / 实测帧率 / 视频流 / 音轨 /
         **音轨是否真的有信号** / 采集是否稀疏。输出机器可读台账（`--out`），供 audit 复用与 stale 检测。
-        **探测不出来的状态一律 `undetermined` 并非 0 退出**——不许静默放过。
+        **探测不出来、或探测过程本身失败，一律 `undetermined` 并非 0 退出**——不许静默放过。
 
     audit（采用时间线审计）  <timeline.tsv> --preflight p.json --silence-ledger gaps.tsv
                             --subtitle s.srt --audio a.wav --final-mp4 final.mp4
+                            --receipt produce-receipt.json
         以**实际采用的那一份 timeline** 为唯一入口，判定：
-          **锚点交叉核对**：旁白声明的 (asset, event, interval) 必须与这一行**真实画面的源区间**对得上
-              —— 引用区间必须落在画面区间内；单事件镜头不得把旁白挂到别的事件上；
-              跨回合镜头必须显式声明覆盖了哪些回合，且旁白引用区间要覆盖整个镜头跨度。
-          **保持帧**：`freeze>0` 必须有带源时间码的标注，锚点要落在画面区间（+旁白引用区间）内；
-              奖励保持帧还必须落在候选可见区间内。
-          **静默依据**：长静默逐段 keep/cut/narration_added + 依据；台账陈旧/自相矛盾都失败。
-          **内容级版本绑定**：timeline 声明字幕/音轨/成片的内容 hash，并逐条核对
-              **字幕文本与时点**是否就是这一版时间线的内容（同段数但改词/改时间照样失败）。
-          **stale 素材台账**：preflight 记录的 sha256/size 必须与磁盘实测一致。
-        所有区间/时长/容差都拒绝 NaN、inf、负数与倒序。
+          **锚点交叉核对**：旁白声明的 (asset, event, interval) 必须与这一行**真实画面的源区间**对得上。
+          **阶段**：同 phase 才默认允许；跨 phase 必须显式 `claim_mode=retrospective`，
+              且同一事件上"画面还没到那个阶段却已经在讲结果"仍然失败。全局 phase 顺序**不被当成时间轴**。
+          **静默**：按**实际声段**（`final_start` + 实测 `audio_duration_s`）算并取并集，
+              不是按画面窗口；旁白占比同样只算声段。逐段给依据，台账陈旧/自相矛盾都失败。
+          **保持帧 / 可见区间**：见下。
+          **内容级版本绑定 + 制作 receipt**：timeline/字幕/音轨/成片四份内容摘要必须一致，
+              且 receipt（由制作路径写出）必须把这一份 timeline 与这三份产物绑在同一次制作上；
+              字幕还要**逐句核对文本与时点**。同段数改词/改时间、旧音轨、旧成片都失败。
+        所有区间/时长/容差都拒绝 NaN、inf、负数与倒序，且容差有合理上界。
 
 它**不做什么**：不看画面、不听音轨、不判断听感与事实语义。**人填的锚点与标注本身不构成机器证据**
 —— 报告里有 `human_annotations_not_machine_verified` 与 `not_a_verdict_on` 两块显式写出这条边界。
+receipt 也只能证明"这几份产物是一次制作、且与这份 timeline 一致"，**它没有签名，防不了伪造**。
 
 用法：
 
@@ -31,7 +33,7 @@
     python3 "$S/check_timeline_audit.py" preflight --json --out preflight.json rec-win=/abs/win.mp4
     python3 "$S/check_timeline_audit.py" audit timeline.tsv --preflight preflight.json \\
         --silence-ledger gaps.tsv --subtitle subs.srt --audio voice_master.wav \\
-        --final-mp4 final.mp4 --json --report-out audit-report.json
+        --final-mp4 final.mp4 --receipt produce-receipt.json --json --report-out audit-report.json
 
 退出码：0=该模式通过，1=有缺陷/未就绪，2=用法或读取错误。
 """
@@ -56,11 +58,16 @@ DEFAULT_SILENCE_S = 20.0
 DEFAULT_MIN_FPS = 12.0
 DEFAULT_SILENCE_DB = -60.0
 DEFAULT_SYNC_TOL = 0.25
+MAX_TOL = 10.0                 # 容差超过这个值，门槛就没有意义了
+MIN_SILENCE_S = 0.5
+MAX_SILENCE_S = 3600.0
 
 PHASE_ORDER = ["setup", "battle", "reward", "map", "shop", "rest", "event", "other"]
+CLAIM_MODES = ("live", "retrospective")
 SILENCE_DISPOSITIONS = ("keep", "cut", "narration_added")
 LEDGER_COLUMNS = ["gap_id", "final_range", "disposition", "reason"]
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+RECEIPT_SCHEMA_PREFIX = "gameplay-postproduction/produce-receipt/"
 
 # 严格的有界区间：有限数、起点 >= 0、终点 > 起点。NaN/inf/负值/倒序一律不接受。
 STRICT_RANGE_RE = re.compile(r"^\s*(-?\d+(?:\.\d+)?)\s*-\s*(-?\d+(?:\.\d+)?)\s*$")
@@ -71,9 +78,9 @@ CUE_LINE_RE = re.compile(r"^\s*(\d{1,2}):(\d{2}):(\d{2})[,.](\d{1,3})\s*-->\s*"
 
 PREFLIGHT_SEMANTICS = ("input preflight only: 每个源素材的音轨存在性/是否有真实信号/采集密度被独立探测"
                        "并明确写成状态；它不判断画面内容好不好，也不构成审片通过")
-AUDIT_SEMANTICS = ("adopted-timeline audit only: 锚点与画面源区间的交叉核对、保持帧、静默依据、"
-                   "内容级版本绑定、stale 素材台账按确定性规则判定；它**不看画面、不听音轨**，"
-                   "通过不等于审片通过")
+AUDIT_SEMANTICS = ("adopted-timeline audit only: 锚点与画面源区间的交叉核对、阶段声明、按实际声段算的静默、"
+                   "保持帧、内容级版本绑定与制作 receipt、stale 素材台账按确定性规则判定；"
+                   "它**不看画面、不听音轨**，通过不等于审片通过")
 
 NOT_A_VERDICT_ON = [
     "旁白占比：占比高低不等于内容通过",
@@ -89,9 +96,13 @@ def human_annotation_caveats() -> list:
         "anchor_asset/anchor_event/anchor_source 由人填写：机器只核对它们与画面源区间是否自洽，"
         "不核对「这句话确实在讲那个回合」",
         "evidence 是人工写的来源说明，本身不是证据；证据在源帧，机器不读帧",
+        "claim_mode=retrospective 是人声明的：机器只核对「跨 phase 时必须显式声明」与"
+        "「同一事件不得提前讲结果」，不核对这段回顾是否属实",
         "hold_mark 由人填写：机器核对锚点与区间的关系，不核对「这一帧确实值得保持」",
         "visible_window 由人填写：机器核对锚点落在窗口内，不核对「窗口里确实能看到候选」",
         "keep/cut/narration_added 的静默理由由人给出：机器只核对是否逐段给出且不矛盾",
+        "produce-receipt 是制作路径写出的绑定记录，**没有签名**：它能证明这几份产物属于同一次制作"
+        "且与这份 timeline 一致，防不了蓄意伪造",
     ]
 
 
@@ -128,6 +139,22 @@ def as_finite_float(value) -> float | None:
     return out if math.isfinite(out) else None
 
 
+def validate_tol(value) -> float:
+    """容差：有限、非负、且有合理上界。library 与两个 CLI 共用同一套判定。"""
+    v = as_finite_float(value)
+    if v is None or v < 0 or v > MAX_TOL:
+        raise SystemExit(f"tol 必须是 [0, {MAX_TOL:g}] 内的有限数：{value!r}（NaN/inf/负数/过大一律拒绝）")
+    return v
+
+
+def validate_silence_threshold(value) -> float:
+    v = as_finite_float(value)
+    if v is None or v < MIN_SILENCE_S or v > MAX_SILENCE_S:
+        raise SystemExit(f"silence_threshold 必须是 [{MIN_SILENCE_S:g}, {MAX_SILENCE_S:g}] 内的有限数："
+                         f"{value!r}（NaN/inf/0/负数一律拒绝：那会让静默检查失效）")
+    return v
+
+
 def strict_range(value: str) -> tuple | None:
     """严格解析 `a-b`：必须是有限数、a >= 0、b > a。否则 None（调用方负责报错）。"""
     m = STRICT_RANGE_RE.match(value or "")
@@ -145,6 +172,11 @@ def range_error(label: str, raw: str) -> str:
 
 
 def ffprobe_json(path: Path, entries: str, extra: list | None = None) -> tuple:
+    """`-show_entries` 的分节分隔符是 **`:`**（`stream=…:format=…`）。
+
+    用 `&` 时 ffprobe 不会报错，但 `format` 那一段会被整段丢掉——于是"量不到时长"这种失败
+    会退化成"用了 stream 时长"，静默偏航。这里固定用 `:`，并在解析后核对必需字段是否真的回来了。
+    """
     cmd = ["ffprobe", "-v", "error", "-of", "json", "-show_entries", entries]
     if extra:
         cmd += extra
@@ -164,10 +196,14 @@ def ffprobe_json(path: Path, entries: str, extra: list | None = None) -> tuple:
 
 
 def media_duration(path: Path) -> tuple:
-    data, err = ffprobe_json(path, "format=duration")
+    data, err = ffprobe_json(path, "format=duration:stream=duration")
     if data is None:
         return None, err
-    dur = as_finite_float((data.get("format") or {}).get("duration"))
+    fmt = data.get("format") or {}
+    dur = as_finite_float(fmt.get("duration"))
+    if dur is None:
+        # format 段缺失是**失败**，不是"退而求其次用 stream 时长"
+        dur = max((as_finite_float(s.get("duration")) or 0.0) for s in (data.get("streams") or [{}]))
     if dur is None or dur <= 0:
         return None, f"无法得到有效时长（{dur!r}）"
     return dur, ""
@@ -183,7 +219,11 @@ def has_audio_stream(path: Path) -> tuple:
 # --------------------------------------------------------------------- preflight
 
 def measure_audio_signal(path: Path, silence_db: float) -> tuple:
-    """返回 (audio_signal, max_volume_db, error)。`silent` 是**音轨在但没有信号**，不是「静音源」。"""
+    """返回 (audio_signal, max_volume_db, error)。`silent` 是**音轨在但没有信号**，不是「静音源」。
+
+    **ffmpeg 非 0 退出一律算失败**：解码中途炸掉时日志里可能已经打出了 max_volume，
+    只看那一行会把"没量全"当成"量到了"。
+    """
     cmd = ["ffmpeg", "-nostdin", "-hide_banner", "-nostats", "-v", "info",
            "-i", str(path), "-map", "0:a:0", "-af", "volumedetect", "-f", "null", "-"]
     try:
@@ -193,6 +233,10 @@ def measure_audio_signal(path: Path, silence_db: float) -> tuple:
     except OSError as exc:
         return "unknown", None, f"无法执行 ffmpeg: {type(exc).__name__}: {exc}"
     blob = (p.stderr or "") + (p.stdout or "")
+    if p.returncode != 0:
+        return "unknown", None, (f"ffmpeg volumedetect 返回 {p.returncode}"
+                                f"（{(p.stderr or '').strip().splitlines()[-1][:120] if p.stderr else ''}）"
+                                f" -> 音轨信号未验证")
     m = MAX_VOLUME_RE.search(blob)
     if not m:
         return "unknown", None, "volumedetect 未给出 max_volume（无法判定音轨是否有信号）"
@@ -207,7 +251,9 @@ def measure_audio_signal(path: Path, silence_db: float) -> tuple:
 
 def probe_asset(asset_id: str, path: Path, min_fps: float, silence_db: float) -> tuple:
     rep = Report()
-    rec = {"asset_id": asset_id, "source_path": str(path), "status": "undetermined",
+    resolved = path.expanduser()
+    rec = {"asset_id": asset_id, "source_path": str(resolved.resolve()) if resolved.exists()
+           else str(resolved), "source_path_as_given": str(path), "status": "undetermined",
            "sha256": None, "size_bytes": None, "duration_s": None, "avg_fps": None,
            "frames": None, "has_video": False, "has_audio": False,
            "audio_signal": "unknown", "audio_max_volume_db": None,
@@ -215,12 +261,14 @@ def probe_asset(asset_id: str, path: Path, min_fps: float, silence_db: float) ->
     if not path.is_file():
         rep.error(f"{asset_id}: 源文件不存在或不是普通文件: {path}")
         return rec, rep
+    # 台账里存**绝对规范路径**：换 cwd 之后 audit 仍能核对同一份素材
+    rec["source_path"] = str(path.resolve())
 
     rec["sha256"] = sha256_file(path)
     rec["size_bytes"] = path.stat().st_size
 
     data, err = ffprobe_json(path, "stream=codec_type,avg_frame_rate,r_frame_rate,nb_frames,duration,"
-                                   "width,height&format=duration,size")
+                                   "width,height:format=duration,size")
     if data is None:
         rep.error(f"{asset_id}: 无法探测媒体（{err}）")
         return rec, rep
@@ -233,8 +281,10 @@ def probe_asset(asset_id: str, path: Path, min_fps: float, silence_db: float) ->
         rep.error(f"{asset_id}: 没有视频流 -> 不是可用的源画面")
         return rec, rep
 
-    dur = as_finite_float((data.get("format") or {}).get("duration")) or \
-        as_finite_float(video[0].get("duration"))
+    fmt_dur = as_finite_float((data.get("format") or {}).get("duration"))
+    dur = fmt_dur if fmt_dur is not None else as_finite_float(video[0].get("duration"))
+    if fmt_dur is None:
+        rep.warn(f"{asset_id}: 容器的 format 时长缺失，退用视频流时长")
     if dur is None or dur <= 0:
         rep.error(f"{asset_id}: 无法得到有效时长（{dur!r}）")
         return rec, rep
@@ -397,8 +447,24 @@ def _merge(intervals: list, tol: float) -> list:
     return [(a, b) for a, b in out]
 
 
-def _find_gaps(narration_windows: list, total: float, threshold: float, tol: float) -> list:
-    merged = _merge(narration_windows, tol)
+def narration_spans(narration_rows: list) -> list:
+    """**实际声段**，不是画面窗口。
+
+    声段 = `[final_range 起点, final_range 起点 + 实测 audio_duration_s]`。
+    一段 60s 的画面只配了 1s 旁白，就只能算 1s 有声，剩下 59s 是静默。
+    （时间线不带 offset 列；offset 记账在 EDL 里，build_sample 默认量级 ~0.2s，
+    小于台账匹配容差，故不在这里重复建模——这条假设写在 canonical 标准里。）
+    """
+    spans = []
+    for r in narration_rows:
+        start = r["final"][0]
+        end = start + (r["audio_duration_s"] or 0.0)
+        spans.append((start, end))
+    return spans
+
+
+def _find_gaps(audio_spans: list, total: float, threshold: float, tol: float) -> list:
+    merged = _merge(audio_spans, tol)
     if not merged:
         return [(0.0, round(total, 3))] if total >= threshold else []
     gaps = []
@@ -415,22 +481,82 @@ def _find_gaps(narration_windows: list, total: float, threshold: float, tol: flo
 def _empty_report(threshold: float) -> dict:
     """同一个 JSON 形状，即使审计在列检查阶段就退出。消费方不必写防御性 .get 链。"""
     return {"silence": {"threshold_s": threshold, "gaps": [], "narration_ratio": None,
-                        "ledger_sha256": None},
-            "holds": [], "anchors": [], "phases": {}, "version_binding": {},
+                        "narration_audio_s": None, "ledger_sha256": None},
+            "holds": [], "anchors": [], "phase_crossings": [], "phases": {},
+            "version_binding": {}, "receipt": {},
             "human_annotations_not_machine_verified": human_annotation_caveats(),
             "not_a_verdict_on": NOT_A_VERDICT_ON}
 
 
+def _resolve_source_path(raw: str, manifest_dir: Path) -> Path:
+    """相对路径按 **manifest 所在目录**解析，避免换 cwd 就误判成"源不存在"。"""
+    p = Path(raw).expanduser()
+    return p if p.is_absolute() else (manifest_dir / p)
+
+
+def verify_receipt(rep: Report, receipt_path: Path, timeline: Path, subtitle: Path, audio: Path,
+                   final_mp4: Path, assets: dict, used_assets: set) -> dict:
+    """制作 receipt：把这一份 timeline 与这三份产物绑在**同一次制作**上。
+
+    它能证明的是"这几份产物是一起被产出的、且与这份 timeline 一致"；它**没有签名**，防不了伪造。
+    没有它，"拿一份旧成片 + 新写一份声明了旧 hash 的时间线"就能自称语义正确。
+    """
+    if not receipt_path.is_file():
+        rep.error(f"制作 receipt 不存在或未提供: {receipt_path} -> 无法证明这些产物属于同一次制作"
+                  f"（只读旧媒体再手写一份声明，不构成验证）")
+        return {}
+    try:
+        rec = json.loads(receipt_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"receipt 不是 JSON: {exc}")
+    if not isinstance(rec, dict):
+        raise SystemExit("receipt 顶层必须是对象")
+    out = {"path": str(receipt_path), "sha256": sha256_file(receipt_path),
+           "produced_by": rec.get("produced_by"), "produced_at": rec.get("produced_at")}
+    if not str(rec.get("schema", "")).startswith(RECEIPT_SCHEMA_PREFIX):
+        rep.error(f"receipt schema={rec.get('schema')!r} 不是 {RECEIPT_SCHEMA_PREFIX}* -> 不是本流程的收据")
+    if not str(rec.get("produced_by") or "").strip():
+        rep.error("receipt 缺少 produced_by（哪条制作路径写出的）-> 无法追溯来源")
+
+    for key, path, label in (("timeline", timeline, "时间线"), ("subtitle", subtitle, "字幕"),
+                             ("audio", audio, "音轨"), ("final", final_mp4, "成片")):
+        entry = rec.get(key) if isinstance(rec.get(key), dict) else {}
+        want = entry.get("sha256")
+        if not SHA256_RE.match(str(want or "")):
+            rep.error(f"receipt 缺少 {key}.sha256 -> 无法把{label}绑到这一次制作")
+            continue
+        if path.is_file():
+            live = sha256_file(path)
+            if want != live:
+                rep.error(f"receipt 里的 {key} sha256 与当前{label}文件不一致 -> "
+                          f"这几份产物不是同一次制作的（旧媒体 + 新时间线会被拦下）")
+
+    srcs = rec.get("sources") if isinstance(rec.get("sources"), dict) else {}
+    out["sources"] = sorted(srcs)
+    for asset in sorted(used_assets):
+        want = srcs.get(asset)
+        if not SHA256_RE.match(str(want or "")):
+            rep.error(f"receipt 没有记录素材 {asset} 的 sha256 -> 无法确认这次制作读的是哪份源")
+        elif want != (assets.get(asset) or {}).get("sha256"):
+            rep.error(f"receipt 记录的素材 {asset} sha256 与 preflight 台账不一致 -> 源对不上")
+    return out
+
+
 def build_audit_payload(timeline: Path, preflight_path: Path, ledger_path: Path,
                         subtitle_path: Path, audio_path: Path, final_mp4: Path,
-                        silence_threshold: float, tol: float) -> dict:
+                        receipt_path: Path, silence_threshold: float, tol: float) -> dict:
     """跑完整审计并返回结构化 payload（不打印、不写文件）。
 
-    `ready` 门槛从这里取判定，所以审计规则只有这一份实现。
+    `ready` 门槛从这里取判定，所以审计规则只有这一份实现；参数校验（含 finite/上界）也在这层，
+    这样 CLI 与 library 两侧口径一致。
     """
+    tol = validate_tol(tol)
+    silence_threshold = validate_silence_threshold(silence_threshold)
+
     rep = Report()
     holds: list = []
     anchors: list = []
+    phase_crossings: list = []
     phases: dict = {}
     narration_rows: list = []
     subtitle_sources: set = set()
@@ -447,6 +573,7 @@ def build_audit_payload(timeline: Path, preflight_path: Path, ledger_path: Path,
     except json.JSONDecodeError as exc:
         raise SystemExit(f"preflight 报告不是 JSON: {exc}")
     assets = pf.get("assets") or {}
+    manifest_dir = preflight_path.resolve().parent
     if not pf.get("ok", False):
         rep.error("preflight 报告自身未通过（输入状态未确定）-> 不得据此审计")
     if not assets:
@@ -457,7 +584,7 @@ def build_audit_payload(timeline: Path, preflight_path: Path, ledger_path: Path,
     missing = [c for c in BASE_COLUMNS + AUDIT_COLUMNS if c not in header]
     if missing:
         rep.error(f"缺少必需列: {', '.join(missing)}"
-                  f"（审计列见 templates/timeline.md；缺失即无法判定锚点/保持帧/静默/版本绑定）")
+                  f"（审计列见 templates/timeline.md；缺失即无法判定锚点/阶段/保持帧/静默/版本绑定）")
         return _payload(rep, timeline, _empty_report(silence_threshold), 0)
 
     # 区间算术（clip==source 长度、final==clip/speed+freeze、重叠）只有**一个** owner：
@@ -505,6 +632,7 @@ def build_audit_payload(timeline: Path, preflight_path: Path, ledger_path: Path,
         narration = get("narration_text")
         has_narration = not is_nullish(narration)
         event_phase, claim_phase = get("event_phase").lower(), get("claim_phase").lower()
+        claim_mode = get("claim_mode").lower()
         if event_phase not in PHASE_ORDER:
             rep.error(f"{event_raw}: event_phase={get('event_phase')!r} 非法，只能是 "
                       f"{'/'.join(PHASE_ORDER)}")
@@ -512,18 +640,34 @@ def build_audit_payload(timeline: Path, preflight_path: Path, ledger_path: Path,
             phases[event_phase] = phases.get(event_phase, 0) + 1
 
         if has_narration:
-            # 阶段锚点：旁白不得讲一个画面上还没发生的阶段
+            # ---- 阶段：同 phase 默认允许；跨 phase 必须显式声明为事后复盘 ----
+            if claim_mode not in CLAIM_MODES:
+                rep.error(f"{event_raw}: claim_mode={get('claim_mode')!r} 非法，只能是 "
+                          f"{'/'.join(CLAIM_MODES)}（跨 phase 必须显式声明 retrospective）")
             if claim_phase not in PHASE_ORDER:
                 rep.error(f"{event_raw}: claim_phase={get('claim_phase')!r} 非法（旁白行必须声明主张阶段）")
             elif event_phase in PHASE_ORDER:
-                ci, ei = PHASE_ORDER.index(claim_phase), PHASE_ORDER.index(event_phase)
-                if ci > ei:
-                    rep.error(f"{event_raw}: 阶段错位——旁白主张的阶段「{claim_phase}」晚于画面阶段"
-                              f"「{event_phase}」。这就是「战斗还没打完就在说打完了/我拿了 X」"
-                              f"（把台词移到真实发生的那一段，或改稿）")
-                elif ci < ei:
-                    rep.warn(f"{event_raw}: 旁白主张「{claim_phase}」早于画面「{event_phase}」——"
-                             f"属事后回顾，允许，但请确认不是错位")
+                if claim_phase == event_phase:
+                    if claim_mode == "retrospective":
+                        rep.warn(f"{event_raw}: 声明了 retrospective，但主张阶段与画面阶段相同"
+                                 f"（{claim_phase}）——多此一举，确认不是误填")
+                elif claim_mode != "retrospective":
+                    rep.error(f"{event_raw}: 旁白主张的阶段「{claim_phase}」与画面阶段「{event_phase}」"
+                              f"不同，但 claim_mode={get('claim_mode')!r} —— 跨 phase 必须显式写成 "
+                              f"`retrospective`，否则阶段检查会被绕开")
+                else:
+                    # 全局 phase 顺序**不是**时间轴（循环游戏里 map/shop/rest/battle 会反复出现），
+                    # 所以只在一个事件内部、"画面还没到那个阶段却已经在讲结果"时判失败。
+                    later = PHASE_ORDER.index(claim_phase) > PHASE_ORDER.index(event_phase)
+                    same_event = len(owns) == 1 and set(event_parts(get("anchor_event"))) <= set(owns)
+                    if later and same_event:
+                        rep.error(
+                            f"{event_raw}: 阶段错位——同一事件上「画面还在 {event_phase}，"
+                            f"旁白已经在讲 {claim_phase}」，这就是「战斗还没打完就在说打完了/我拿了 X」。"
+                            f"把台词移到真实发生的那一段，或让这一镜真的覆盖那个事件")
+                    else:
+                        phase_crossings.append({"event_id": event_raw, "event_phase": event_phase,
+                                                "claim_phase": claim_phase, "declared": "retrospective"})
 
             # ---- 锚点交叉核对：声明的 (asset, event, interval) 必须与真实画面源区间对得上 ----
             anchor_asset = get("anchor_asset")
@@ -646,9 +790,14 @@ def build_audit_payload(timeline: Path, preflight_path: Path, ledger_path: Path,
         if rec is None:
             rep.error(f"素材 {asset} 在 timeline 里被引用，但 preflight 报告里没有它 -> 无法核验")
             continue
-        sp = Path(str(rec.get("source_path") or ""))
+        raw_path = str(rec.get("source_path") or "")
+        if not raw_path:
+            rep.error(f"素材 {asset}: preflight 报告没有 source_path -> 无法核验")
+            continue
+        sp = _resolve_source_path(raw_path, manifest_dir)
         if not sp.is_file():
-            rep.error(f"素材 {asset}: 源文件不存在: {sp} -> 无法核验（不得当作已验证）")
+            rep.error(f"素材 {asset}: 源文件不存在: {sp}（相对路径按 manifest 目录解析）-> "
+                      f"无法核验（不得当作已验证）")
             continue
         want_sha, want_size = rec.get("sha256"), rec.get("size_bytes")
         if not SHA256_RE.match(str(want_sha or "")):
@@ -677,9 +826,9 @@ def build_audit_payload(timeline: Path, preflight_path: Path, ledger_path: Path,
             rep.note_unverified(f"{asset}: 源为稀疏采集（约 {rec.get('avg_fps')}fps）—— "
                                 f"时间正确但运动信息有限，不得声称画面动感充足")
 
-    # --- 长静默逐段依据 ---
-    gaps = _find_gaps([(r["final"][0], r["final"][1]) for r in narration_rows],
-                      total_final, silence_threshold, tol)
+    # --- 长静默逐段依据（按**实际声段**，不是画面窗口） ---
+    spans = narration_spans(narration_rows)
+    gaps = _find_gaps(spans, total_final, silence_threshold, tol)
     ledger_rows: list = []
     if ledger_path.is_file():
         _d, lheader, lrows = read_table(ledger_path)
@@ -733,12 +882,13 @@ def build_audit_payload(timeline: Path, preflight_path: Path, ledger_path: Path,
             rep.error(f"静默台账 {entry['gap_id']}（{entry['range'][0]}-{entry['range'][1]}s）"
                       f"在成片里找不到对应的静默 -> 台账陈旧（重新从实际采用时间线生成）")
 
-    narration_ratio = (sum(r["final"][1] - r["final"][0] for r in narration_rows) / total_final) \
-        if total_final else 0.0
+    narration_audio = sum(e - s for s, e in spans)
+    narration_ratio = (narration_audio / total_final) if total_final else 0.0
 
-    # --- 内容级版本绑定：字幕/音轨/成片必须就是这一版 timeline 的产物 ---
+    # --- 内容级版本绑定 + 制作 receipt ---
     binding = {"timeline": str(timeline), "timeline_sha256": sha256_file(timeline),
                "narration_rows": len(narration_rows), "total_final_s": round(total_final, 3),
+               "narration_audio_s": round(narration_audio, 3),
                "subtitle_source": sorted(subtitle_sources)[0] if len(subtitle_sources) == 1 else None,
                "subtitle_sources": sorted(subtitle_sources),
                "declared": {k: sorted(v) for k, v in declared.items()}}
@@ -775,25 +925,32 @@ def build_audit_payload(timeline: Path, preflight_path: Path, ledger_path: Path,
         text_bad = [r["event_id"] for cue, r in zip(cues, ordered) if norm(cue["text"]) != r["text"]]
         timing_bad = [r["event_id"] for cue, r in zip(cues, ordered)
                       if not (r["final"][0] - tol <= cue["start"]
-                              and cue["end"] <= r["final"][1] + tol)]
+                              and cue["end"] <= r["final"][0] + r["audio_duration_s"] + tol)]
         if text_bad:
             rep.error(f"字幕文本与该段口播稿不一致（同段数但改了词）：{', '.join(text_bad[:4])}"
                       f" -> 字幕必须是实际采用稿，不是另写一份")
         if timing_bad:
-            rep.error(f"字幕时点落出该段的成片区间（同段数但改了时间）：{', '.join(timing_bad[:4])}")
+            rep.error(f"字幕时点落出该段的实际声段（同段数但改了时间）：{', '.join(timing_bad[:4])}"
+                      f" -> 字幕时点必须属于这一版时间线的配音段")
 
-    # 音轨：内容 hash + 时长
+    # 音轨：内容 hash + 时长 + **真的有音轨**
     if not audio_path.is_file():
         rep.error(f"音轨文件不存在: {audio_path}")
     else:
         adur, aerr = media_duration(audio_path)
+        a_stream, a_serr = has_audio_stream(audio_path)
         binding["audio"] = str(audio_path)
         binding["audio_sha256"] = sha256_file(audio_path)
         binding["audio_duration_s"] = adur
+        binding["audio_has_stream"] = a_stream
         want_aud = declared["audio_sha256"]
         if len(want_aud) == 1 and next(iter(want_aud)) != binding["audio_sha256"]:
             rep.error(f"音轨内容 hash 不符：timeline 声明 {next(iter(want_aud))[:12]}…，"
                       f"实际 {binding['audio_sha256'][:12]}… -> 这是旧音轨，不是这一版时间线的产物")
+        if a_stream is None:
+            rep.error(f"无法判定音轨是否真的有音频流（{a_serr}）")
+        elif a_stream is False:
+            rep.error("--audio 指向的文件没有音频流 —— 只凭容器时长不算音轨")
         if adur is None:
             rep.error(f"音轨时长无法测量（{aerr}）-> 无法做版本绑定")
         else:
@@ -802,7 +959,7 @@ def build_audit_payload(timeline: Path, preflight_path: Path, ledger_path: Path,
                 rep.error(f"音轨 {adur:.3f}s 与时间线总长 {total_final:.3f}s 相差 "
                           f"{abs(adur - total_final):.3f}s（容差 {tol}）-> 音轨不是这一版时间线的产物")
 
-    # 成片：必须给、必须存在、内容 hash + 时长 + 有音轨
+    # 成片：必须给、必须存在、内容 hash + 时长 + 有音轨 + 与时间线同长
     if not final_mp4.is_file():
         rep.error(f"成片文件不存在或未提供: {final_mp4} -> 未验证，不得当作已审片")
     else:
@@ -820,16 +977,24 @@ def build_audit_payload(timeline: Path, preflight_path: Path, ledger_path: Path,
             rep.error(f"成片时长无法测量（{ferr}）-> 无法做版本绑定")
         elif abs(fdur - total_final) > tol:
             rep.error(f"成片 {fdur:.3f}s 与时间线总长 {total_final:.3f}s 相差 "
-                      f"{abs(fdur - total_final):.3f}s（容差 {tol}）")
+                      f"{abs(fdur - total_final):.3f}s（容差 {tol}）-> 最终媒体不是这一版时间线的产物")
         if faud is False:
             rep.error("成片没有音轨——带解说的成片必须有音轨")
 
-    rep.note_unverified(f"旁白占比 {narration_ratio * 100:.1f}%（这只是占比，不是内容通过）")
+    # 制作 receipt：把 timeline 与三份产物绑到同一次制作上
+    receipt = verify_receipt(rep, receipt_path, timeline, subtitle_path, audio_path, final_mp4,
+                             assets, used_assets)
+
+    rep.note_unverified(f"旁白占比 {narration_ratio * 100:.1f}%（按实测声段 {narration_audio:.3f}s / "
+                        f"成片 {total_final:.3f}s；这只是占比，不是内容通过）")
     rep.note_unverified("听感、抑扬、断句自然度：机器不判，需真人听")
     rep.note_unverified("事实语义（选牌/伤害/胜负/身份）：必须回源帧，机器不裁定")
     for ev in [r["event_id"] for r in narration_rows if len(event_parts(r["event_id"])) > 1]:
         rep.note_unverified(f"{ev}: 跨回合镜头——机器只确认旁白引用区间覆盖了镜头跨度，"
                             f"不确认画面里确实是那几个回合")
+    for x in phase_crossings:
+        rep.note_unverified(f"{x['event_id']}: 声明为跨阶段事后复盘（画面 {x['event_phase']} / "
+                            f"主张 {x['claim_phase']}）——机器不核对这段回顾是否属实")
     for hold in holds:
         rep.note_unverified(f"{hold['event_id']}: 冻结 {hold['freeze_s']}s 停在源 "
                             f"{hold['anchor_s']}s —— 标注与区间自洽，但「该帧确实值得保持」仍需人看")
@@ -837,11 +1002,15 @@ def build_audit_payload(timeline: Path, preflight_path: Path, ledger_path: Path,
     report = {
         "silence": {"threshold_s": silence_threshold, "gaps": matched_gaps,
                     "narration_ratio": round(narration_ratio, 4),
+                    "narration_audio_s": round(narration_audio, 3),
+                    "audio_spans": [[round(s, 3), round(e, 3)] for s, e in spans],
                     "ledger_sha256": sha256_file(ledger_path) if ledger_path.is_file() else None},
         "holds": holds,
         "anchors": anchors,
+        "phase_crossings": phase_crossings,
         "phases": phases,
         "version_binding": binding,
+        "receipt": receipt,
         "human_annotations_not_machine_verified": human_annotation_caveats(),
         "not_a_verdict_on": NOT_A_VERDICT_ON,
     }
@@ -856,10 +1025,10 @@ def _payload(rep: Report, timeline: Path, report: dict, rows_checked: int) -> di
 
 
 def run_audit(timeline: Path, preflight_path: Path, ledger_path: Path, subtitle_path: Path,
-              audio_path: Path, final_mp4: Path, silence_threshold: float, tol: float,
-              as_json: bool, report_out) -> int:
+              audio_path: Path, final_mp4: Path, receipt_path: Path, silence_threshold: float,
+              tol: float, as_json: bool, report_out) -> int:
     payload = build_audit_payload(timeline, preflight_path, ledger_path, subtitle_path, audio_path,
-                                  final_mp4, silence_threshold, tol)
+                                  final_mp4, receipt_path, silence_threshold, tol)
     if report_out is not None:
         report_out.parent.mkdir(parents=True, exist_ok=True)
         report_out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -899,13 +1068,14 @@ def main(argv: list | None = None) -> int:
                    help=f"max_volume ≤ 该值视为静音音轨（默认 {DEFAULT_SILENCE_DB:g} dB）")
     p.add_argument("--json", action="store_true")
 
-    a = sub.add_parser("audit", help="锚点/保持帧/静默/内容级版本绑定/stale 台账审计")
+    a = sub.add_parser("audit", help="锚点/阶段/保持帧/静默/内容级版本绑定/receipt/stale 台账审计")
     a.add_argument("timeline")
     a.add_argument("--preflight", required=True, help="preflight 写出的素材台账 JSON")
     a.add_argument("--silence-ledger", required=True, help="静默台账 TSV（逐段给依据）")
     a.add_argument("--subtitle", required=True, help="实际采用的字幕文件（.srt）")
-    a.add_argument("--audio", required=True, help="实际采用的旁白音轨")
+    a.add_argument("--audio", required=True, help="实际采用的旁白音轨（必须真的有音频流）")
     a.add_argument("--final-mp4", required=True, help="实际导出的成片（内容 hash/时长/音轨核验）")
+    a.add_argument("--receipt", required=True, help="制作 receipt（build_sample.sh 在制作时写出）")
     a.add_argument("--silence-threshold", type=float, default=DEFAULT_SILENCE_S,
                    help=f"多长的无口播算「需要依据」（默认 {DEFAULT_SILENCE_S:g}s）")
     a.add_argument("--tol", type=float, default=DEFAULT_SYNC_TOL,
@@ -914,14 +1084,21 @@ def main(argv: list | None = None) -> int:
     a.add_argument("--json", action="store_true")
 
     args = ap.parse_args(argv)
-    for label in ("min_fps", "silence_db", "silence_threshold", "tol"):
-        value = getattr(args, label, None)
-        if value is None:
-            continue
-        if not math.isfinite(value) or (label != "silence_db" and value < 0):
-            print(f"ERROR: --{label.replace('_', '-')} 必须是有限"
-                  f"{'值' if label == 'silence_db' else '非负数'}: {value!r}", file=sys.stderr)
-            return 2
+    try:
+        if args.mode == "preflight":
+            min_fps = as_finite_float(args.min_fps)
+            if args.min_fps is None or min_fps is None or min_fps < 0:
+                print(f"ERROR: --min-fps 必须是有限非负数: {args.min_fps!r}", file=sys.stderr)
+                return 2
+            if args.silence_db is None or as_finite_float(args.silence_db) is None:
+                print(f"ERROR: --silence-db 必须是有限数: {args.silence_db!r}", file=sys.stderr)
+                return 2
+        else:
+            validate_tol(args.tol)
+            validate_silence_threshold(args.silence_threshold)
+    except SystemExit as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
 
     if not shutil.which("ffprobe") or not shutil.which("ffmpeg"):
         print("ERROR: 需要 ffprobe/ffmpeg（本工具不做任何模型调用）", file=sys.stderr)
@@ -934,8 +1111,8 @@ def main(argv: list | None = None) -> int:
         return run_audit(Path(args.timeline).expanduser(), Path(args.preflight).expanduser(),
                          Path(args.silence_ledger).expanduser(), Path(args.subtitle).expanduser(),
                          Path(args.audio).expanduser(), Path(args.final_mp4).expanduser(),
-                         args.silence_threshold, args.tol, args.json,
-                         Path(args.report_out).expanduser() if args.report_out else None)
+                         Path(args.receipt).expanduser(), args.silence_threshold, args.tol,
+                         args.json, Path(args.report_out).expanduser() if args.report_out else None)
     except (SystemExit, OSError, ValueError) as exc:
         if getattr(args, "json", False):
             print(json.dumps({"mode": args.mode, "ok": False, "errors": [str(exc)],

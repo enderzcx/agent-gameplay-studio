@@ -1,12 +1,14 @@
 # SYNTHETIC FIXTURE - fabricated data, not a real match. No real path, name or number.
 # Used by tests/test_timeline_audit.py. asset_id `rec-synth` is mapped to a scratch MP4 by the
 # test harness. The three @..._SHA@ tokens are replaced with the real digests of the media the
-# harness generates; running `audit` on this file as-is must fail the version binding, and that
-# is correct - an unbound timeline is not deliverable.
+# harness generates, and the harness also writes the matching produce-receipt.json; running
+# `audit` on this file as-is must fail the version binding and the receipt check, and that is
+# correct - an unbound timeline is not deliverable.
 # Rule exercised by each column: anchor_* is cross-checked against THIS row's real source span;
-# the three *_sha256 columns bind the outputs by content, not by segment count.
-asset_id	event_id	source_range	clip_range	final_range	speed/freeze	narration_text	audio_duration_s	subtitle_source	event_phase	claim_phase	anchor_asset	anchor_event	anchor_source	evidence	hold_mark	visible_window	subtitle_sha256	audio_sha256	final_sha256
-rec-synth	ev-001	0.0-6.0	0.0-6.0	0.0-6.0	1x	opening line	5.5	subs-synth	battle	battle	rec-synth	ev-001	1.0-5.5	src rec-synth@1.0s battle opening	-	-	@SUB_SHA@	@AUD_SHA@	@FINAL_SHA@
-rec-synth	ev-002	6.0-12.0	6.0-12.0	6.0-12.0	1x	mid-battle line	5.5	subs-synth	battle	battle	rec-synth	ev-002	nan-5.0	src rec-synth@8.0s enemy turn	-	-	@SUB_SHA@	@AUD_SHA@	@FINAL_SHA@
-rec-synth	ev-003	12.0-16.0	12.0-16.0	34.0-40.0	1x + 定格2s	reward line	5.5	subs-synth	reward	reward	rec-synth	ev-003	12.5-15.5	src rec-synth@13.5s three reward cards visible	复盘定格 · 源 rec-synth@13.5s（候选保持）	13.0-14.5	@SUB_SHA@	@AUD_SHA@	@FINAL_SHA@
-rec-synth	ev-004+ev-005	16.0-20.0	16.0-20.0	62.0-66.0	1x	closing line covering both turns	3.5	subs-synth	map	map	rec-synth	ev-004+ev-005	16.0-20.0	src rec-synth@16.0-20.0s both turns	-	-	@SUB_SHA@	@AUD_SHA@	@FINAL_SHA@
+# claim_mode must be `retrospective` for any cross-phase line; the three *_sha256 columns bind the
+# outputs by content, not by segment count.
+asset_id	event_id	source_range	clip_range	final_range	speed/freeze	narration_text	audio_duration_s	subtitle_source	event_phase	claim_phase	claim_mode	anchor_asset	anchor_event	anchor_source	evidence	hold_mark	visible_window	subtitle_sha256	audio_sha256	final_sha256
+rec-synth	ev-001	0.0-6.0	0.0-6.0	0.0-6.0	1x	opening line	5.5	subs-synth	battle	battle	live	rec-synth	ev-001	1.0-5.5	src rec-synth@1.0s battle opening	-	-	@SUB_SHA@	@AUD_SHA@	@FINAL_SHA@
+rec-synth	ev-002	6.0-12.0	6.0-12.0	6.0-12.0	1x	mid-battle line	5.5	subs-synth	battle	battle	live	rec-synth	ev-002	nan-5.0	src rec-synth@8.0s enemy turn	-	-	@SUB_SHA@	@AUD_SHA@	@FINAL_SHA@
+rec-synth	ev-003	12.0-16.0	12.0-16.0	34.0-40.0	1x + 定格2s	reward line	5.5	subs-synth	reward	reward	live	rec-synth	ev-003	12.5-15.5	src rec-synth@13.5s three reward cards visible	复盘定格 · 源 rec-synth@13.5s（候选保持）	13.0-14.5	@SUB_SHA@	@AUD_SHA@	@FINAL_SHA@
+rec-synth	ev-004+ev-005	16.0-20.0	16.0-20.0	62.0-66.0	1x	closing line covering both turns	3.5	subs-synth	map	map	live	rec-synth	ev-004+ev-005	16.0-20.0	src rec-synth@16.0-20.0s both turns	-	-	@SUB_SHA@	@AUD_SHA@	@FINAL_SHA@

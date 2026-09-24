@@ -20,7 +20,7 @@
   不附带签名二进制。
 - **配音与组装工具**（`tools/voice/`）：可选 TTS 适配器、放不下就拒绝导出的 EDL 组装器、
   以及给没有 libass 的 ffmpeg 用的字幕烧录器。
-- **142 项离线测试**：不需要网络、不需要密钥、不需要游戏。
+- **184 项离线测试**：不需要网络、不需要密钥、不需要游戏。
 
 第一次来？先看[最短可复制 quick start](#最短可复制-quick-start)，再看
 [实际使用 skill](#实际使用-skill)，然后读[哪些真的验证过](#哪些真的验证过哪些没有)再决定信什么。
@@ -66,7 +66,8 @@ python3 "$A" preflight --json --out preflight.json rec-example-01=/abs/path/to/r
 
 ```bash
 python3 "$A" audit timeline.tsv --preflight preflight.json --silence-ledger gaps.tsv \
-    --subtitle subs.srt --audio voice_master.wav --final-mp4 final.mp4 --report-out audit-report.json
+    --subtitle subs.srt --audio voice_master.wav --final-mp4 final.mp4 \
+    --receipt produce-receipt.json --report-out audit-report.json
 python3 "$C" ready review-sheet.md --final-mp4 /abs/path/to/final.mp4 \
     --timeline timeline.tsv --preflight preflight.json \
     --silence-ledger gaps.tsv --subtitle subs.srt --audio voice_master.wav
@@ -154,10 +155,10 @@ python3 "$REPO/skills/gameplay-postproduction/scripts/check_postproduction.py" -
 | **现成 GUI / 一键出片** | **不存在 —— 这是刻意的** | 这是 skill + 脚本。剪辑器你自己带。 |
 | **捆绑的模型 / key / 端点 / 额度** | **没有** | 安装本仓库不会带来任何模型能力；不把 TTS 适配器指向你自己的端点，它什么也做不了。 |
 | Python 3.9 兼容性 | **已验证** | 整套离线测试是在 Python **3.9.6**（`/usr/bin/python3`）上跑的，不只是新解释器。 |
-| 后期产物（timeline / units / 审片单） | **已验证 · 离线** | `tests/test_check_postproduction.py`：26 例，无网络、无模型 |
+| 后期产物（timeline / units / 审片单） | **已验证 · 离线** | `tests/test_check_postproduction.py`：32 例，无网络、无模型 |
 | 确定性检查器（结构 + `ready` 门槛） | **已验证 · 离线** | 同一套测试；`ready` 用 `ffprobe` 独立探测媒体，且缺审计输入一律不通过 |
 | 输入预检（音轨 present/silent/absent、采集 normal/sparse） | **已验证 · 离线** | `tests/test_timeline_audit.py`：对 lavfi 合成素材跑真 ffmpeg/ffprobe，含 `undetermined` 失败路径 |
-| 采用时间线审计（阶段锚点 / 保持帧 / 可见区间 / 静默依据 / 版本绑定 / stale 台账） | **已验证 · 离线** | 同一套 58 例，每个缺陷都由一个匿名合成 fixture 复现（锚点 / 内容绑定 / 数值拒绝） |
+| 采用时间线审计（阶段锚点 / 保持帧 / 可见区间 / 静默依据 / 版本绑定 / stale 台账） | **已验证 · 离线** | 同一套 94 例，每个缺陷都由一个匿名合成 fixture 复现（锚点 / 阶段声明 / 按实际声段的静默 / 内容绑定 / 制作 receipt / 数值拒绝） |
 | 听感、事实语义、"这条片子好不好" | **不判定 —— 这是刻意的** | `audit` 报告里有 `not_a_verdict_on` 列表；只有真人听看 + 回源帧能定 |
 | 合成媒体走 EDL 组装（真 `ffmpeg`） | **已验证 · 离线** | `tests/test_build_sample.py`：7 例，lavfi 合成素材（含 draft/审计路径） |
 | TTS 适配器硬保证（不改稿 / 空音频与测不出时长都失败 / 缓存不放废件 / 只重算改变节点） | **已验证 · 离线** | `tests/test_tts_guarantees.py`：51 例，走回环假端点 |

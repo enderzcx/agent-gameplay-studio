@@ -117,8 +117,8 @@ def test_normal_length_mapping(root: Path, src: Path, vdir: Path) -> None:
 AUDIT_SCRIPT = HERE.parent / "skills" / "gameplay-postproduction" / "scripts" / "check_timeline_audit.py"
 AUDIT_HDR = ("asset_id\tevent_id\tsource_range\tclip_range\tfinal_range\tspeed/freeze\t"
              "narration_text\taudio_duration_s\tsubtitle_source\tevent_phase\tclaim_phase\t"
-             "anchor_asset\tanchor_event\tanchor_source\tevidence\thold_mark\tvisible_window\t"
-             "subtitle_sha256\taudio_sha256\tfinal_sha256\n")
+             "claim_mode\tanchor_asset\tanchor_event\tanchor_source\tevidence\thold_mark\t"
+             "visible_window\tsubtitle_sha256\taudio_sha256\tfinal_sha256\n")
 
 
 def _sha(p: Path) -> str:
@@ -129,7 +129,7 @@ def _sha(p: Path) -> str:
 def write_timeline(out: Path, dur: float) -> Path:
     """与本次产物绑定的最小采用时间线（1 段），用于驱动 build_sample 的审计路径。"""
     row = ["rec-test", "ev-1", "0.0-2.0", "0.0-2.0", f"0.0-{dur}", "1x", "audit line", "1.0",
-           "subs-test", "battle", "battle", "rec-test", "ev-1", "0.1-1.9",
+           "subs-test", "battle", "battle", "live", "rec-test", "ev-1", "0.1-1.9",
            "src rec-test@0.5s synthetic battle screen", "-", "-",
            _sha(out / "subs.srt"), _sha(out / "voice_master.wav"), _sha(out / "final.mp4")]
     tl = out / "timeline.tsv"
@@ -182,7 +182,16 @@ def test_passing_audit_clears_the_draft_mark(root: Path, src: Path, vdir: Path) 
     assert p2.returncode == 0, f"绑定好的时间线仍被拒:\n{p2.stdout[-800:]}\n{p2.stderr[-400:]}"
     assert (out / "audit-report.json").exists(), "没有留下审计报告"
     assert not (out / "DRAFT.txt").exists(), "审计通过了却还留着 DRAFT 标记"
-    print("ok  test_passing_audit_clears_the_draft_mark（审计通过才取消 draft，并留下报告）")
+    receipt = json.loads((out / "produce-receipt.json").read_text(encoding="utf-8"))
+    assert receipt["schema"].startswith("gameplay-postproduction/produce-receipt/"), receipt["schema"]
+    assert receipt["produced_by"].endswith("build_sample.sh"), receipt["produced_by"]
+    assert receipt["timeline"]["sha256"] == _sha(tl), "receipt 没有绑到这一份 timeline"
+    assert receipt["final"]["sha256"] == _sha(out / "final.mp4"), "receipt 没有绑到实际成片"
+    assert receipt["subtitle"]["sha256"] == _sha(out / "subs.srt"), "receipt 没有绑到实际字幕"
+    assert receipt["audio"]["sha256"] == _sha(out / "voice_master.wav"), "receipt 没有绑到实际音轨"
+    assert receipt["sources"].get("rec-test") == json.loads(
+        pre.read_text(encoding="utf-8"))["assets"]["rec-test"]["sha256"], receipt["sources"]
+    print("ok  test_passing_audit_clears_the_draft_mark（审计通过才取消 draft，并留下报告与制作 receipt）")
 
 
 def test_bad_header_is_rejected(root: Path, src: Path, vdir: Path) -> None:
