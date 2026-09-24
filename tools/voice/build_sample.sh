@@ -21,6 +21,9 @@
 #
 # 环境变量（**没有私有默认值**，源视频必须显式给）：
 #   SRC_VIDEO   源录屏文件（必需）
+#   TIMELINE / PREFLIGHT / SILENCE_LEDGER   可选：给了就在导出后**现场跑采用时间线审计**
+#               （与 `ready` 门槛同一个 checker、同一套规则）。审计不过 → 退出 3，并写出
+#               `DRAFT.txt`；没给 → 产物一律标为 **DRAFT（不可交付）**，见文件末尾。
 #   SRC_CROP    源画面的裁剪/缩放滤镜链，默认 scale=960:-2（等宽等比）。
 #               若源片里混入了带答案的辅助面板，必须在这里显式裁掉。
 #   OUT_FPS     输出帧率，默认 30（降采样，不补帧）
@@ -39,6 +42,7 @@
 set -euo pipefail
 
 TL="${1:?edl tsv}"; VDIR="${2:?voice dir}"; OUT="${3:?out dir}"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC="${SRC_VIDEO:?必须显式给源视频：SRC_VIDEO=/path/to/source.mp4（本脚本不内置任何私有默认路径）}"
 CROP="${SRC_CROP:-scale=960:-2}"           # 默认等比缩到宽 960；混入带答案的面板时必须显式裁掉
 FPS="${OUT_FPS:-30}"                       # 降采样，不补帧
@@ -199,3 +203,45 @@ ffmpeg -nostdin -v error -y -i "$OUT/video_raw.mp4" -i "$OUT/voice_master.wav" \
   -map 0:v -map 1:a -c:v copy -c:a aac -b:a 192k -shortest "$OUT/final.mp4"
 echo "final: $OUT/final.mp4"
 ffprobe -v error -show_entries format=duration,size -show_entries stream=codec_type,codec_name,width,height,sample_rate,channels -of default=nw=1 "$OUT/final.mp4"
+
+# ---------------------------------------------------------------- 采用时间线审计（默认验收路径）
+# 这里调用的是 `ready` 门槛用的**同一个** checker 与**同一套**规则：锚点与画面源区间交叉核对、
+# 保持帧、静默依据、内容级版本绑定、stale 素材台账。不给输入就只有 draft 产物（见下）。
+AUDIT="$HERE/../../skills/gameplay-postproduction/scripts/check_timeline_audit.py"
+SUBS_FILE="${SUBS:-$OUT/subs.srt}"
+if [ -n "${TIMELINE:-}" ] && [ -n "${PREFLIGHT:-}" ] && [ -n "${SILENCE_LEDGER:-}" ] \
+   && [ -f "$AUDIT" ]; then
+  echo "--- 采用时间线审计（$TIMELINE）---"
+  if python3 "$AUDIT" audit "$TIMELINE" --preflight "$PREFLIGHT" \
+       --silence-ledger "$SILENCE_LEDGER" --subtitle "$SUBS_FILE" \
+       --audio "$OUT/voice_master.wav" --final-mp4 "$OUT/final.mp4" \
+       --report-out "$OUT/audit-report.json"; then
+    rm -f "$OUT/DRAFT.txt"
+    echo "审计通过：$OUT/audit-report.json（≠ 审片通过；听感与事实语义仍需人核）"
+    echo "交付前仍需过 ready 门槛（单子 + 同一套审计输入 + 这个 final.mp4）。"
+  else
+    {
+      echo "DRAFT - NOT DELIVERABLE"
+      echo "reason: 采用时间线审计未通过（见 $OUT/audit-report.json 或上面的 stdout）"
+    } > "$OUT/DRAFT.txt"
+    echo "!! 审计未通过：产物留在 $OUT，但已标记为 draft，不是可交付成片。" >&2
+    exit 3
+  fi
+else
+  cat > "$OUT/DRAFT.txt" <<'DRAFTEOF'
+DRAFT - NOT DELIVERABLE
+This cut was assembled WITHOUT the adopted-timeline audit: TIMELINE / PREFLIGHT / SILENCE_LEDGER
+were not all provided. Anchoring, holds, silence justification, version binding and the source
+ledger are therefore UNCHECKED, and this output is a draft only - it must not be handed over.
+
+Make it deliverable:
+  TIMELINE=timeline.tsv PREFLIGHT=preflight.json SILENCE_LEDGER=gaps.tsv \
+    SRC_VIDEO=/abs/source.mp4 build_sample.sh <edl.tsv> <voice_dir> <out_dir>
+  # then the delivery gate (same audit, plus the review sheet):
+  python3 <repo>/skills/gameplay-postproduction/scripts/check_postproduction.py ready sheet.md \
+      --final-mp4 <out_dir>/final.mp4 --timeline timeline.tsv --preflight preflight.json \
+      --silence-ledger gaps.tsv --subtitle <out_dir>/subs.srt --audio <out_dir>/voice_master.wav
+DRAFTEOF
+  echo "!! DRAFT ONLY：没有同时提供 TIMELINE / PREFLIGHT / SILENCE_LEDGER，" >&2
+  echo "   本产物**未过采用时间线审计**，已写出 $OUT/DRAFT.txt；交付前必须过 ready 门槛。" >&2
+fi

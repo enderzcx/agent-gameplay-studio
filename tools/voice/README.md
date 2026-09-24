@@ -148,7 +148,7 @@ with Pillow and composites it with `overlay ... enable='between(t,a,b)'`. The de
 # from the repository root
 python3 tests/test_build_sample.py     # 4 cases: overlong rejected, freeze honoured,
                                        # length mapping, bad header rejected
-python3 tests/test_tts_guarantees.py   # 48 cases against a local fake endpoint (loopback only)
+python3 tests/test_tts_guarantees.py   # 51 cases against a local fake endpoint (loopback only)
 ```
 
 `test_build_sample.py` builds all its media from `ffmpeg` lavfi sources — no real footage, no game,

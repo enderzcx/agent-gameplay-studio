@@ -10,7 +10,10 @@
     readiness（就绪门槛）  ready
         在 structure 之上，要求：表头声明已填、没有未填占位符、结论已写、
         并且**独立探测实际导出的 MP4**（不是采信表里写的数字）。
-        仍然**不判断画面好不好**——它只回答"能不能把这份单子当作已审片交付"。
+        **还要过一遍采用时间线的语义审计**（`--timeline` + `--preflight` + 静默台账 +
+        字幕 + 音轨，见 `check_timeline_audit.py`）：阶段锚点、保持帧标注与可见区间、
+        旁白是否放得进窗口、长静默依据、版本绑定、stale 素材台账。
+        仍然**不判断画面好不好、不听音轨**——它只回答"能不能把这份单子当作已审片交付"。
 
 用法：
 
@@ -18,7 +21,9 @@
     python3 "$S/scripts/check_postproduction.py" timeline "timeline.tsv"   # TSV（TAB 或 | 自动识别）
     python3 "$S/scripts/check_postproduction.py" units    "units.tsv"      # TSV（见 templates/commentary-unit.md）
     python3 "$S/scripts/check_postproduction.py" sheet    "review-sheet.md" # Markdown
-    python3 "$S/scripts/check_postproduction.py" ready    "review-sheet.md" --final-mp4 "/abs/final.mp4"
+    python3 "$S/scripts/check_postproduction.py" ready    "review-sheet.md" --final-mp4 "/abs/final.mp4" \\
+        --timeline timeline.tsv --preflight preflight.json --silence-ledger gaps.tsv \\
+        --subtitle subs.srt --audio voice_master.wav
 
 退出码：0=该模式通过，1=有缺陷/未就绪，2=用法或读取错误。
 `--json` 输出结构化结果（供测试与自动化使用）。
@@ -38,12 +43,14 @@ import sys
 from pathlib import Path
 
 TOL = 0.05
+DEFAULT_AUDIT_TOL = 0.25
 RANGE_RE = re.compile(r"^\s*(-?\d+(?:\.\d+)?)\s*-\s*(-?\d+(?:\.\d+)?)\s*$")
 SF_RE = re.compile(r"^\s*(?P<speed>\d+(?:\.\d+)?)x\s*(?:\+\s*定格\s*(?P<freeze>\d+(?:\.\d+)?)\s*s)?\s*$")
 PLACEHOLDER_RE = re.compile(r"_{3,}|\bTBD\b|\bTODO\b")
 
-TIMELINE_COLUMNS = ["asset_id", "event_id", "source_range", "clip_range", "final_range",
-                    "speed/freeze", "narration_text", "audio_duration_s", "subtitle_source"]
+BASE_COLUMNS = ["asset_id", "event_id", "source_range", "clip_range", "final_range",
+                "speed/freeze", "narration_text", "audio_duration_s", "subtitle_source"]
+TIMELINE_COLUMNS = BASE_COLUMNS
 UNITS_COLUMNS = ["event_id", "source_range", "state", "action", "stated_reason",
                  "retrospective_commentary", "outcome", "coverage"]
 UNITS_OPTIONAL_COLUMNS = ["reason_source"]
@@ -78,8 +85,16 @@ class Report:
 
 STRUCTURE_SEMANTICS = "structure-valid only: 字段/算术/章节齐全；不代表审片通过，也不代表成片可用"
 READY_SEMANTICS = ("readiness gate only: 必查项已明确判定通过且有证据 + 结论明确通过 + "
-                   "末段媒体的**元数据/轨道**经独立探测且与声明一致。"
-                   "它**不观看尾段、不检查帧内容、不验证音画同步**，不替代人工审片")
+                   "末段媒体的**元数据/轨道**经独立探测且与声明一致 + "
+                   "**采用时间线通过语义审计**（锚点与画面源区间交叉核对 / 保持帧 / 静默依据 / "
+                   "内容级版本绑定 / stale 素材台账）。审计由本进程**现场重跑**，不接受外部报告替代。"
+                   "它**不观看尾段、不检查帧内容、不验证音画同步、不听音轨**，不替代人工审片")
+
+# 采用时间线在基础列之外还必须带的审计列。这里只声明 schema；**语义判定只有一个 owner**：
+# check_timeline_audit.py（它 import 本模块的读取/区间工具，方向单一，不构成环）。
+AUDIT_COLUMNS = ["event_phase", "claim_phase", "anchor_asset", "anchor_event", "anchor_source",
+                 "evidence", "hold_mark", "visible_window",
+                 "subtitle_sha256", "audio_sha256", "final_sha256"]
 
 
 def read_table(path: Path) -> tuple[str, list[str], list[list[str]]]:
@@ -204,6 +219,17 @@ def check_timeline(path: Path) -> Report:
                 elif cur[i0] - prev[i1] > TOL:
                     rep.warn(f"asset {asset}: {label} 区间有 {cur[i0] - prev[i1]:.2f}s 空隙 "
                              f"（{prev[0]} → {cur[0]}）")
+
+    # 审计列只做"给了就得给全"的 schema 判断；阶段锚点/保持帧/静默依据等**语义**由
+    # check_timeline_audit.py 判定（单一 owner），ready 门槛会强制跑它。
+    provided = [c for c in AUDIT_COLUMNS if c in header]
+    if provided and len(provided) != len(AUDIT_COLUMNS):
+        rep.error(f"审计列不完整：还缺 {', '.join(c for c in AUDIT_COLUMNS if c not in header)}"
+                  f"（要么全给，要么全不给）")
+    elif not provided:
+        rep.warn("缺少审计列（event_phase/claim_phase/evidence/hold_mark/visible_window）："
+                 "结构通过只说明字段与算术自洽；交付前必须过 `check_timeline_audit.py audit`"
+                 "（`ready` 门槛已强制要求），否则阶段错位/无标注保持帧/长静默无从判定")
     return rep
 
 
@@ -298,6 +324,10 @@ CONCLUSION_RE = re.compile(r"是否需要重做整场\s*：\s*(?P<value>.*)$", r
 def probe_media(path: Path) -> dict:
     """独立探测媒体**元数据与轨道**（不采信单子里写的数字，也不观看内容）。
 
+    这里刻意保留自己的 ffprobe 调用，而不复用 `check_timeline_audit.py` 里的 JSON 包装：
+    依赖方向是 audit -> 本模块（audit 要拿 AUDIT_COLUMNS/区间工具），反过来 import 会成环。
+    两者职责也不同——这里只问"末段 MP4 有没有可读视频流/音轨/有效时长"。
+
     返回 {"ok": bool, "error": str|None, "duration": float|None,
           "has_video": bool, "has_audio": bool, "streams": int}
     失败一律结构化返回，不抛裸异常。
@@ -338,13 +368,59 @@ def probe_media(path: Path) -> dict:
     return out
 
 
-def check_ready(path: Path, final_mp4: Path | None, tol_override: float | None) -> Report:
+def run_timeline_audit(rep: Report, timeline: Path, preflight: Path, silence_ledger: Path,
+                       subtitle: Path, audio: Path, final_mp4: Path,
+                       silence_threshold: float, tol: float) -> None:
+    """把采用时间线的语义审计接进 ready 门槛。
+
+    单独跑 `check_timeline_audit.py audit` 也能得到同样的判定；这里只是**让它不可跳过**。
+    审计的语义 owner 是那一个模块，本函数不重复实现任何规则。
+
+    注意：**没有**"提交一份审计 JSON 就算过"的入口。`ready` 总是现场重跑审计，
+    否则一份过期或伪造的独立报告就能绕过全部语义检查。
+    """
+    try:
+        from check_timeline_audit import build_audit_payload
+    except ImportError as exc:                          # pragma: no cover - 同目录一起发布
+        rep.error(f"无法加载时间线审计模块（{exc}）-> 就绪门槛不完整，未就绪")
+        return
+    try:
+        payload = build_audit_payload(timeline, preflight, silence_ledger, subtitle, audio,
+                                      final_mp4, silence_threshold, tol)
+    except (SystemExit, OSError, ValueError) as exc:
+        rep.error(f"时间线审计无法执行：{exc} -> 未就绪")
+        return
+    rep.checked += int(payload.get("checked_rows") or 0)
+    if payload.get("ok"):
+        return
+    errors = payload.get("errors") or ["时间线审计未通过"]
+    shown = errors[:6]
+    for msg in shown:
+        rep.error(f"时间线审计: {msg}")
+    if len(errors) > len(shown):
+        rep.error(f"时间线审计: 另有 {len(errors) - len(shown)} 条同类问题（跑 "
+                  f"`check_timeline_audit.py audit ... --json` 看全量）")
+
+
+def check_ready(path: Path, final_mp4: Path | None, tol_override: float | None,
+                timeline: Path | None = None, preflight: Path | None = None,
+                silence_ledger: Path | None = None, subtitle: Path | None = None,
+                audio: Path | None = None, silence_threshold: float = 20.0) -> Report:
     rep = check_sheet(path)                      # 复用结构检查
     text = path.read_text(encoding="utf-8")
 
     unfilled = unfilled_lines(text)
     if unfilled:
         rep.error(f"仍有 {len(unfilled)} 处未填占位符（示例: {unfilled[0]!r}）-> 未就绪")
+
+    # 采用时间线的语义审计是门槛的一部分，不是可选项：缺任一输入就不构成"已审片"。
+    missing_audit = [name for name, value in (("--timeline", timeline), ("--preflight", preflight),
+                                              ("--silence-ledger", silence_ledger),
+                                              ("--subtitle", subtitle), ("--audio", audio))
+                     if value is None]
+    if missing_audit:
+        rep.error(f"缺少 {' '.join(missing_audit)}：采用时间线未做语义审计 -> 状态 unverified"
+                  f"（阶段锚点/保持帧/长静默依据/版本绑定都未判定，不得当作已审片）")
 
     m_file = HEADER_FILE_RE.search(text)
     declared_file = (m_file.group("value").strip() if m_file else "")
@@ -460,40 +536,47 @@ def check_ready(path: Path, final_mp4: Path | None, tol_override: float | None) 
         rep.error(f"声明时长非有限数: {declared_dur!r} -> 未就绪")
     tol = tol_override if tol_override is not None else declared_tol
 
+    # 末段媒体：**先收集全部问题，不提前 return** —— 任何一条提前退出都会让语义审计被跳过，
+    # 而"缺媒体参数"本身也不该成为绕开审计的通道。
+    media = None
+    probe_target = final_mp4 if final_mp4 is not None else Path("（未提供 --final-mp4）")
     if final_mp4 is None:
         rep.error("未提供 --final-mp4：末段媒体未经独立探测 -> 状态 unverified（不得当作已审片）")
-        return rep
-    if not final_mp4.is_file():
+    elif not final_mp4.is_file():
         rep.error(f"--final-mp4 指向的文件不存在: {final_mp4} -> 未就绪")
-        return rep
+    else:
+        # 声明文件与实际验证文件必须归一后相同，否则等于"审的是 A、验的是 B"
+        if declared_file:
+            try:
+                if Path(declared_file).expanduser().resolve() != final_mp4.resolve():
+                    rep.error(f"表头「成片文件」{declared_file} 与 --final-mp4 {final_mp4} "
+                              f"归一化后不是同一个文件 -> 未就绪（不得审 A 验 B）")
+            except OSError as exc:
+                rep.error(f"无法归一化文件路径: {exc} -> 未就绪")
+        media = probe_media(final_mp4)
+        if not media["ok"]:
+            rep.error(f"媒体探测失败（{media['error']}）-> 未就绪")
+            media = None
+        else:
+            rep.checked += 1
+            if not media["has_video"]:
+                rep.error("该文件没有视频流 -> 未就绪")
+            if not media["has_audio"]:
+                rep.error("该文件没有音轨——带解说的成片必须有音轨 -> 未就绪")
+            if media["duration"] is None or not math.isfinite(media["duration"]) \
+                    or media["duration"] <= 0:
+                rep.error(f"无法得到有效时长（{media['duration']!r}）-> 未就绪")
+                media = None
+            elif declared_dur is None or tol is None:
+                rep.error("缺少可比的声明时长/容差，无法与实测比对 -> 未就绪")
+            elif abs(media["duration"] - declared_dur) > tol + 1e-9:
+                rep.error(f"实测时长 {media['duration']:.3f}s 与声明 {declared_dur:.3f}s 相差 "
+                          f"{abs(media['duration'] - declared_dur):.3f}s，超出容差 {tol} -> 未就绪")
 
-    # 声明文件与实际验证文件必须归一后相同，否则等于"审的是 A、验的是 B"
-    if declared_file:
-        try:
-            if Path(declared_file).expanduser().resolve() != final_mp4.resolve():
-                rep.error(f"表头「成片文件」{declared_file} 与 --final-mp4 {final_mp4} "
-                          f"归一化后不是同一个文件 -> 未就绪（不得审 A 验 B）")
-        except OSError as exc:
-            rep.error(f"无法归一化文件路径: {exc} -> 未就绪")
-
-    media = probe_media(final_mp4)
-    if not media["ok"]:
-        rep.error(f"媒体探测失败（{media['error']}）-> 未就绪")
-        return rep
-    rep.checked += 1
-    if not media["has_video"]:
-        rep.error("该文件没有视频流 -> 未就绪")
-    if not media["has_audio"]:
-        rep.error("该文件没有音轨——带解说的成片必须有音轨 -> 未就绪")
-    if media["duration"] is None or not math.isfinite(media["duration"]) or media["duration"] <= 0:
-        rep.error(f"无法得到有效时长（{media['duration']!r}）-> 未就绪")
-        return rep
-    if declared_dur is None or tol is None:
-        rep.error("缺少可比的声明时长/容差，无法与实测比对 -> 未就绪")
-        return rep
-    if abs(media["duration"] - declared_dur) > tol + 1e-9:
-        rep.error(f"实测时长 {media['duration']:.3f}s 与声明 {declared_dur:.3f}s 相差 "
-                  f"{abs(media['duration'] - declared_dur):.3f}s，超出容差 {tol} -> 未就绪")
+    # 缺审计输入的情况**已在前面报过错**，这里只决定跑不跑；不接受外部审计报告替代现场重跑。
+    if not missing_audit:
+        run_timeline_audit(rep, timeline, preflight, silence_ledger, subtitle, audio,
+                           probe_target, silence_threshold, DEFAULT_AUDIT_TOL)
     return rep
 
 
@@ -514,6 +597,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("file")
     ap.add_argument("--final-mp4", default=None,
                     help="ready 模式：实际导出的 MP4 路径（会被独立 ffprobe 探测）")
+    ap.add_argument("--timeline", default=None,
+                    help="ready 模式：实际采用的统一时间线 TSV（必填，会被语义审计）")
+    ap.add_argument("--preflight", default=None,
+                    help="ready 模式：`check_timeline_audit.py preflight --out` 写出的素材台账 JSON（必填）")
+    ap.add_argument("--silence-ledger", default=None, help="ready 模式：静默台账 TSV（必填）")
+    ap.add_argument("--subtitle", default=None, help="ready 模式：实际采用的字幕文件（必填）")
+    ap.add_argument("--audio", default=None, help="ready 模式：实际采用的旁白音轨（必填）")
+    ap.add_argument("--silence-threshold", type=float, default=20.0,
+                    help="ready 模式：多长的无口播算“需要依据”（默认 20s）")
     ap.add_argument("--tol", type=float, default=None,
                     help="ready 模式：覆盖单子里声明的时长容差（秒）")
     ap.add_argument("--json", action="store_true")
@@ -530,10 +622,14 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     path = Path(args.file).expanduser()
+    expand = lambda v: Path(v).expanduser() if v else None  # noqa: E731
     try:
         if args.mode == "ready":
-            rep = check_ready(path, Path(args.final_mp4).expanduser() if args.final_mp4 else None,
-                              args.tol)
+            rep = check_ready(path, expand(args.final_mp4), args.tol,
+                              timeline=expand(args.timeline), preflight=expand(args.preflight),
+                              silence_ledger=expand(args.silence_ledger),
+                              subtitle=expand(args.subtitle), audio=expand(args.audio),
+                              silence_threshold=args.silence_threshold)
             semantics = READY_SEMANTICS
         else:
             fn, semantics = MODES[args.mode]

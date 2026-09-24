@@ -72,8 +72,9 @@ python3 "$REPO/skills/$SKILL/scripts/check_postproduction.py" --help
 | 与宿主视频分析/剪辑能力的边界与替换方式 | `references/routing.md` |
 | **配音的声音层（角色/发音词典/控制手段真实效力/引擎参数边界/人工vs机器验收）** | `references/voice-design.md` |
 | **录"游戏原声"（入口、前置设置、预检/停止后探测）** | `references/spire-checklist.md` §录游戏原声 |
-| 产物形状 | `templates/asset-register.md`、`commentary-unit.md`、`timeline.md`、`review-sheet.md` |
-| 机器校验 | `scripts/check_postproduction.py` |
+| 产物形状 | `templates/asset-register.md`、`commentary-unit.md`、`timeline.md`、`silence-ledger.md`、`review-sheet.md` |
+| 机器校验（结构/就绪） | `scripts/check_postproduction.py` |
+| 输入预检 + 采用时间线语义审计 | `scripts/check_timeline_audit.py`（锚点交叉核对/保持帧/静默依据/内容级版本绑定/stale 台账，规则见 canonical §1.1、§4.1–4.5） |
 
 只在需要时读对应文件，不要把全部 references 一次加载。
 
@@ -99,7 +100,8 @@ python3 "$REPO/skills/$SKILL/scripts/check_postproduction.py" --help
 |---|---|
 | 没有事件日志 | 从**宿主的视频理解能力**得到**候选**事件，再回源帧核验；不得凭候选直接写旁白 |
 | 源画面缺失但日志里有 | 记 `coverage_gap`，该单元**不进成片解说** |
-| 无音轨 | **可接受**（有意静音源）；但**不得编造源音**，最终成片仍必须有音轨。若用户**要求游戏原声**，先按 `references/spire-checklist.md` §录游戏原声 走录制入口并预检：**只有音轨、没有真实信号的"静音音轨"不得静默通过**，必须查明是目标自身静音、抓错目标还是权限问题 |
+| 音轨情况 | **先用 `check_timeline_audit.py preflight` 独立探测**，不要靠人填：`absent`（真的没有音轨）**可接受**（有意静音源），但**不得编造源音**，成片仍必须有音轨；`silent`（音轨在但无真实信号）**不得静默通过**，须查明是目标自身静音、抓错目标还是权限问题；`undetermined` 一律不得当作通过 |
+| 采集稀疏（如约 1.5 fps） | 预检标 `frame_sampling: sparse`。**时间正确 ≠ 画质恢复**：不得声称画面动感充足，也不得插帧假装流畅，限制要写进审片单 |
 | 依赖缺失（外部定位工具/网络/模型通道不可用） | 诚实标 `degraded`/`blocked`；能用 ffprobe/ffmpeg 本地完成的步骤继续做，**不换通道绕过真实权限拒绝** |
 
 ## 工作阶段
@@ -126,6 +128,12 @@ python3 "$REPO/skills/$SKILL/scripts/check_postproduction.py" --help
 4. **审片问题单**：必查项 + 问题清单（`issue_id/event_id/asset_id/源区间/成片区间/旁白主张/实际画面/证据/局部修复建议`）。
    终片审查的对象是**实际导出的 MP4**；**未知不得当通过**（无真值填 `unknown`，不填 `0`）。
    → `templates/review-sheet.md`
+5. **门槛输入（`ready` 强制要求，缺一即未就绪，且不接受外部报告替代现场重跑）**：
+   `preflight.json`（源台账，`preflight --out` 生成）、`gaps.tsv`（每段 ≥ 阈值的无口播逐段给
+   `keep|cut|narration_added` + 依据 → `templates/silence-ledger.md`）、以及
+   `audit-report.json`（锚点核对 / 保持帧 / 静默 / **内容级版本绑定** / `unverified` /
+   `human_annotations_not_machine_verified` / `not_a_verdict_on` → `check_timeline_audit.py audit`）。
+   时间线必须自带字幕/音轨/成片三份**内容摘要**，只数段数或只 hash 输入原片挡不住旧产物。
 
 **证据**：每条事实性结论必须能指到**源帧时间码 / ffprobe 输出 / 文件**。
 **停止条件**：修复**尽量局部**；仍无法确认的事实**如实挂起**（写进问题单的 `unknown`），**不无限循环**。
@@ -137,11 +145,25 @@ python3 "$REPO/skills/$SKILL/scripts/check_postproduction.py" --help
 ```bash
 # 在仓库根目录直接跑（推荐，最省事）
 C=skills/gameplay-postproduction/scripts/check_postproduction.py
+A=skills/gameplay-postproduction/scripts/check_timeline_audit.py
 
+# ① 输入预检：源有没有音轨、音轨有没有真实信号、采集是否稀疏（真 ffprobe/ffmpeg，不出网）
+python3 "$A" preflight --json --out preflight.json rec-win=/abs/win.mp4 rec-both=/abs/both.mp4
+
+# ② 结构检查
 python3 "$C" timeline "timeline.tsv"                 # 结构：TSV（TAB 或 | 自动识别）
 python3 "$C" units    "units.tsv"                    # 结构：TSV（见 templates/commentary-unit.md）
 python3 "$C" sheet    "review-sheet.md"              # 结构：Markdown（见 templates/review-sheet.md）
-python3 "$C" ready    "review-sheet.md" --final-mp4 "/abs/path/final.mp4"   # 就绪门槛
+
+# ③ 采用时间线语义审计（阶段锚点 / 保持帧 / 静默依据 / 版本绑定 / stale 素材台账）
+python3 "$A" audit "timeline.tsv" --preflight preflight.json \
+    --silence-ledger gaps.tsv --subtitle subs.srt --audio voice_master.wav \
+    --json --report-out audit-report.json
+
+# ④ 就绪门槛：单子 + 实际导出的 MP4 + 上面那一整套审计输入（缺一即未就绪）
+python3 "$C" ready "review-sheet.md" --final-mp4 "/abs/path/final.mp4" \
+    --timeline timeline.tsv --preflight preflight.json \
+    --silence-ledger gaps.tsv --subtitle subs.srt --audio voice_master.wav
 
 # 装载到宿主后：
 # S="$HOME/.agents/skills/gameplay-postproduction"   # 换成你的实际安装路径
@@ -155,10 +177,13 @@ python3 "$C" ready    "review-sheet.md" --final-mp4 "/abs/path/final.mp4"   # �
 | 模式 | 输入格式 | 通过意味着 |
 |---|---|---|
 | `timeline` / `units` / `sheet` | TSV（TAB 或 `\|`）/ TSV / Markdown | **仅"结构合法"**：字段齐全、算术自洽、章节完整。**空白模板也会通过** —— 这不代表审片通过，也不代表成片可用。 |
-| `ready` | Markdown（+ `--final-mp4`） | **"可交付就绪"**：A1–A5/E1–E9/G1–G3 全部**明确判定为「是」且有证据**（仅 G2 允许 N/A）、无未填占位符、无未解决 issue、H 段**明确且唯一地写「通过」**，且末段媒体的**元数据/轨道**（可读视频流 + 音轨 + 有效时长）经独立 `ffprobe` 探测并与声明时长在容差内一致。 |
+| `preflight` | 源素材路径（真 ffprobe/ffmpeg） | **"输入状态已明确"**：音轨存在性（`present`/`silent`/`absent`）、采集密度（`normal`/`sparse`）、摘要与时长全部被独立探测；探测不出来就是 `undetermined` 并**非 0 退出**。 |
+| `audit` | timeline TSV + preflight 台账 + 静默台账 + 字幕 + 音轨 + 成片 | **"采用时间线自洽"**：旁白声明的 (素材, 回合, 源区间) 与本行真实画面源区间交叉核对通过（跨回合句必须覆盖镜头跨度）、阶段不提前、`freeze>0` 都有带源时间码的标注（奖励保持帧还须落在候选可见区间内）、旁白放得进窗口、每段长静默有依据、字幕/音轨/成片按**内容 hash + 字幕文本与时点**与这一版 timeline 绑定、源台账不 stale。 |
+| `ready` | Markdown + `--final-mp4` + 上面那一整套审计输入 | **"可交付就绪"**：A1–A5/E1–E9/G1–G3 全部**明确判定为「是」且有证据**（仅 G2 允许 N/A）、无未填占位符、无未解决 issue、H 段**明确且唯一地写「通过」**、末段媒体的**元数据/轨道**经独立 `ffprobe` 探测并与声明时长在容差内一致，**且采用时间线通过语义审计**。 |
 
-**`ready` 不做什么**：它**不观看尾段、不检查帧内容、不验证音画同步**，也不做画面质量判定 ——
-不替代人工审片。它只回答"这份单子能不能当作已审片交付"。
+**`ready` / `audit` 不做什么**：它们**不观看画面、不听音轨、不检查帧内容、不验证音画同步**，
+也不做画面质量与听感判定 —— 不替代人工审片。审计报告里有一项 `not_a_verdict_on` 明确写着：
+**旁白占比、解码成功、听感、事实语义都不构成内容通过**。
 
 - 只要表里还留着 `____` 之类的占位符、没给 `--final-mp4`、或「成片文件」与 `--final-mp4` 归一后不是同一文件，
   `ready` **一律不通过**（缺 `--final-mp4` 时状态是 `unverified`）。
@@ -180,4 +205,5 @@ python3 "$C" ready    "review-sheet.md" --final-mp4 "/abs/path/final.mp4"   # �
 
 1. 第二个游戏的 `<game>-checklist.md` 出现后，再把通用标准里残留的游戏假设抽干净。
 2. 把 `check_postproduction.py` 的 `sheet` 检查扩展到"必查项证据非空"。
-3. 为宿主视频理解/剪辑能力补一份**最小适配器契约**（输入/输出/证据字段），让"换实现"有据可依。
+3. 让 `audit` 能从 `--preflight` 台账直接核对"每个在 timeline 里用到的 asset_id 都真的登记过"，
+   并把 `visible_window` 从人工填写升级为可选的帧级候选检测（仍需回源确认，不能只信模型）。

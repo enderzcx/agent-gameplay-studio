@@ -11,13 +11,16 @@
 
 - **一套后期 SOP**（`skills/gameplay-postproduction/`）：ingest → analyze → commentary plan →
   edit plan → review → repair，含 canonical 标准、四份产物模板、一份已适配游戏的清单。
-- **一个确定性检查器**：`check_postproduction.py`，纯标准库、零模型调用。它做 timeline / units /
-  审片单的结构校验，并对真实导出的 MP4 跑严格的 `ready` 就绪门槛。
+- **两个确定性检查器**：`check_postproduction.py`（结构 + `ready` 门槛）与
+  `check_timeline_audit.py`（输入预检 + 采用时间线语义审计），都是纯标准库、零模型调用。
+  前者做 timeline / units / 审片单的结构校验并对真实导出的 MP4 跑严格门槛；后者独立探测每个
+  源素材的音轨与采样状态，并审计采用时间线的阶段锚点、保持帧标注与可见区间、逐段静默依据、
+  字幕/音轨版本绑定与素材台账是否 stale。
 - **一个 macOS 录制器**（`tools/gamerec/`）：按 app 过滤，只抓目标应用的声音**和**画面；从源码编译，
   不附带签名二进制。
 - **配音与组装工具**（`tools/voice/`）：可选 TTS 适配器、放不下就拒绝导出的 EDL 组装器、
   以及给没有 libass 的 ffmpeg 用的字幕烧录器。
-- **74 项离线测试**：不需要网络、不需要密钥、不需要游戏。
+- **142 项离线测试**：不需要网络、不需要密钥、不需要游戏。
 
 第一次来？先看[最短可复制 quick start](#最短可复制-quick-start)，再看
 [实际使用 skill](#实际使用-skill)，然后读[哪些真的验证过](#哪些真的验证过哪些没有)再决定信什么。
@@ -41,23 +44,32 @@ cd agent-gameplay-studio
 
 # 0) 先看能做什么，再跑全部离线检查。无网络、无密钥、不需要游戏。
 make help
-make check          # 3 套离线测试：检查器 + EDL 组装 + TTS 硬保证
+make check          # 4 套离线测试：检查器 + 时间线审计 + EDL 组装 + TTS 硬保证
 
 # 1) 检查器可以直接用在你的产物上
 C=skills/gameplay-postproduction/scripts/check_postproduction.py
+A=skills/gameplay-postproduction/scripts/check_timeline_audit.py
 python3 "$C" timeline examples/timeline.example.tsv      # 仅结构
 python3 "$C" units    examples/units.example.tsv
 python3 "$C" sheet    examples/review-sheet.example.md
 # 退出码 0 = 结构合法。对 timeline/units/sheet 来说，这**不代表**成片是好的。
 
+# 先预检源素材（真 ffprobe/ffmpeg）：音轨 present/silent/absent、采集是否 sparse，都写进台账
+python3 "$A" preflight --json --out preflight.json rec-example-01=/abs/path/to/recording.mp4
+
 # 2) 读标准，然后按你自己的录屏填模板
 #    references/postproduction-standard.md 是 canonical
 ```
 
-`ready` 门槛会额外独立探测真实导出的 MP4：
+`ready` 门槛会额外独立探测真实导出的 MP4，**并且强制要求整套审计输入**
+（时间线 / 预检台账 / 静默台账 / 字幕 / 音轨），所以语义审计在交付路径上不可跳过：
 
 ```bash
-python3 "$C" ready review-sheet.md --final-mp4 /abs/path/to/final.mp4
+python3 "$A" audit timeline.tsv --preflight preflight.json --silence-ledger gaps.tsv \
+    --subtitle subs.srt --audio voice_master.wav --final-mp4 final.mp4 --report-out audit-report.json
+python3 "$C" ready review-sheet.md --final-mp4 /abs/path/to/final.mp4 \
+    --timeline timeline.tsv --preflight preflight.json \
+    --silence-ledger gaps.tsv --subtitle subs.srt --audio voice_master.wav
 ```
 
 `ready` = "这份单子可以当作已审片交付"：A/E 每一项都**明确判「是」且有证据**、没有未填占位符、
@@ -142,10 +154,13 @@ python3 "$REPO/skills/gameplay-postproduction/scripts/check_postproduction.py" -
 | **现成 GUI / 一键出片** | **不存在 —— 这是刻意的** | 这是 skill + 脚本。剪辑器你自己带。 |
 | **捆绑的模型 / key / 端点 / 额度** | **没有** | 安装本仓库不会带来任何模型能力；不把 TTS 适配器指向你自己的端点，它什么也做不了。 |
 | Python 3.9 兼容性 | **已验证** | 整套离线测试是在 Python **3.9.6**（`/usr/bin/python3`）上跑的，不只是新解释器。 |
-| 后期产物（timeline / units / 审片单） | **已验证 · 离线** | `tests/test_check_postproduction.py`：22 例，无网络、无模型 |
-| 确定性检查器（结构 + `ready` 门槛） | **已验证 · 离线** | 同一套测试；`ready` 会用 `ffprobe` 独立探测媒体 |
-| 合成媒体走 EDL 组装（真 `ffmpeg`） | **已验证 · 离线** | `tests/test_build_sample.py`：4 例，lavfi 合成素材 |
-| TTS 适配器硬保证（不改稿 / 空音频与测不出时长都失败 / 缓存不放废件） | **已验证 · 离线** | `tests/test_tts_guarantees.py`：21 例，走回环假端点 |
+| 后期产物（timeline / units / 审片单） | **已验证 · 离线** | `tests/test_check_postproduction.py`：26 例，无网络、无模型 |
+| 确定性检查器（结构 + `ready` 门槛） | **已验证 · 离线** | 同一套测试；`ready` 用 `ffprobe` 独立探测媒体，且缺审计输入一律不通过 |
+| 输入预检（音轨 present/silent/absent、采集 normal/sparse） | **已验证 · 离线** | `tests/test_timeline_audit.py`：对 lavfi 合成素材跑真 ffmpeg/ffprobe，含 `undetermined` 失败路径 |
+| 采用时间线审计（阶段锚点 / 保持帧 / 可见区间 / 静默依据 / 版本绑定 / stale 台账） | **已验证 · 离线** | 同一套 58 例，每个缺陷都由一个匿名合成 fixture 复现（锚点 / 内容绑定 / 数值拒绝） |
+| 听感、事实语义、"这条片子好不好" | **不判定 —— 这是刻意的** | `audit` 报告里有 `not_a_verdict_on` 列表；只有真人听看 + 回源帧能定 |
+| 合成媒体走 EDL 组装（真 `ffmpeg`） | **已验证 · 离线** | `tests/test_build_sample.py`：7 例，lavfi 合成素材（含 draft/审计路径） |
+| TTS 适配器硬保证（不改稿 / 空音频与测不出时长都失败 / 缓存不放废件 / 只重算改变节点） | **已验证 · 离线** | `tests/test_tts_guarantees.py`：51 例，走回环假端点 |
 | TTS 适配器能对接**你的**供应商 | **未验证 —— 这是刻意的** | 只针对一种 wire 形状，不做跨供应商声明 |
 | macOS 录音器能编译、离线检查通过 | **已验证** | `tools/gamerec/tests/regression.sh` 离线组：20 项，含两道"默认不覆盖"闸门 |
 | macOS 录音器：必须显式给目标，**绝不**回退抓别的 app | **已验证 · 离线** | 回归 `O1`/`O6`；用法错误在申请任何权限之前就报出 |
@@ -186,9 +201,9 @@ agent-gameplay-studio/
 ├── skills/gameplay-postproduction/
 │   ├── SKILL.md               # SOP 正文（中文；自身声明 license: MIT）
 │   ├── references/            # canonical 标准 / 路由 / 配音设计 / 一个游戏的清单
-│   ├── templates/             # 素材登记 / 解说单元 / 时间线 / 审片单
+│   ├── templates/             # 素材登记 / 解说单元 / 时间线 / 静默台账 / 审片单
 │   ├── evals/trigger_cases.json
-│   └── scripts/check_postproduction.py   # 确定性检查器，不调用任何模型
+│   └── scripts/               # check_postproduction.py + check_timeline_audit.py（都不调用模型）
 ├── tools/gamerec/             # macOS「目标应用原声 + 画面」录制器（Swift）
 ├── tools/voice/               # 可选 TTS 适配器、EDL 组装、字幕烧录
 └── tests/                     # 离线测试

@@ -14,14 +14,17 @@ parts that need judgement stay yours, and the parts that must not be fudged are 
 - **A postproduction SOP** (`skills/gameplay-postproduction/`) covering
   ingest → analyze → commentary plan → edit plan → review → repair, with a canonical standard, four
   artifact templates and one worked game checklist.
-- **A deterministic checker** — `check_postproduction.py`, pure standard library, zero model calls.
-  It validates your timeline / units / review sheet structurally, and runs a strict `ready` gate
-  against a real exported MP4.
+- **Two deterministic checkers** — `check_postproduction.py` (structure + the `ready` gate) and
+  `check_timeline_audit.py` (input preflight + adopted-timeline semantics), both pure standard
+  library, zero model calls. Between them they check the timeline/units/sheet structurally, probe
+  every source for audio and sampling state, audit the adopted timeline for phase anchors, labelled
+  holds, per-gap silence justification, subtitle/audio version binding and stale source manifests,
+  and run a strict `ready` gate against a real exported MP4.
 - **A macOS recorder** (`tools/gamerec/`) that captures one target app's audio *and* picture, filtered
   at the app level, and compiles from source — no signed binary is shipped.
 - **Voice and assembly tools** (`tools/voice/`) — an optional TTS adapter, an EDL assembler that
   refuses to export a mistimed cut, and a subtitle burner for ffmpeg builds without libass.
-- **74 offline tests** that need no network, no keys and no game.
+- **142 offline tests** that need no network, no keys and no game.
 
 New here? Go to [Quick start](#quick-start-shortest-path-that-actually-works), then
 [Using the skill](#using-the-skill), then read
@@ -50,23 +53,33 @@ cd agent-gameplay-studio
 
 # 0) See what this can do, then run every offline check. No network, no keys, no game.
 make help
-make check          # 3 offline suites: checker + EDL assembly + TTS guarantees
+make check          # 4 offline suites: checker + timeline audit + EDL assembly + TTS guarantees
 
-# 1) The deterministic checker works on your own artifacts right away.
+# 1) The deterministic checkers work on your own artifacts right away.
 C=skills/gameplay-postproduction/scripts/check_postproduction.py
+A=skills/gameplay-postproduction/scripts/check_timeline_audit.py
 python3 "$C" timeline examples/timeline.example.tsv      # structure only
 python3 "$C" units    examples/units.example.tsv
 python3 "$C" sheet    examples/review-sheet.example.md
 # exit 0 = structurally valid. For "timeline"/"units"/"sheet" that does NOT mean the cut is good.
 
+# Preflight your sources (real ffprobe/ffmpeg): audio present/silent/absent, sampling sparse or not.
+python3 "$A" preflight --json --out preflight.json rec-example-01=/abs/path/to/recording.mp4
+
 # 2) Read the standard, then fill the templates for your own recording.
 #    references/postproduction-standard.md is canonical.
 ```
 
-The `ready` gate additionally probes a real exported MP4:
+The `ready` gate additionally probes a real exported MP4 **and requires the whole audit input set**
+(timeline, preflight ledger, silence ledger, subtitle, audio), so the semantic audit cannot be
+skipped on the delivery path:
 
 ```bash
-python3 "$C" ready review-sheet.md --final-mp4 /abs/path/to/final.mp4
+python3 "$A" audit timeline.tsv --preflight preflight.json --silence-ledger gaps.tsv \
+    --subtitle subs.srt --audio voice_master.wav --final-mp4 final.mp4 --report-out audit-report.json
+python3 "$C" ready review-sheet.md --final-mp4 /abs/path/to/final.mp4 \
+    --timeline timeline.tsv --preflight preflight.json \
+    --silence-ledger gaps.tsv --subtitle subs.srt --audio voice_master.wav
 ```
 
 `ready` = "this sheet can be treated as reviewed": every A/E item answered **yes with evidence**,
@@ -159,10 +172,13 @@ evidence is in this repo; "unverified" means nobody has shown it works.
 | **Ready-made GUI / one-click render** | **Does not exist — by design** | This is a skill plus scripts. You bring the editor. |
 | **Bundled model, key, endpoint or quota** | **None** | Installing this grants no model capability; the TTS adapter does nothing until you point it at your own endpoint. |
 | Python 3.9 compatibility | **Verified** | The whole offline suite was run on Python **3.9.6** (`/usr/bin/python3`), not only on a newer interpreter. |
-| Postproduction artifacts (timeline / units / review sheet) | **Verified — offline** | `tests/test_check_postproduction.py`: 22 cases, no network, no model |
-| Deterministic checker (structure + `ready` gate) | **Verified — offline** | Same suite; `ready` independently probes the media with `ffprobe` |
-| EDL assembly with synthetic media (real `ffmpeg`) | **Verified — offline** | `tests/test_build_sample.py`: 4 cases, lavfi fixtures |
-| TTS adapter hard guarantees (no rewrite, empty/unmeasurable audio fails, no dud cache) | **Verified — offline** | `tests/test_tts_guarantees.py`: 48 cases against a loopback fake endpoint |
+| Postproduction artifacts (timeline / units / review sheet) | **Verified — offline** | `tests/test_check_postproduction.py`: 26 cases, no network, no model |
+| Deterministic checker (structure + `ready` gate) | **Verified — offline** | Same suite; `ready` independently probes the media with `ffprobe` and refuses to pass without the audit inputs |
+| Input preflight (audio `present`/`silent`/`absent`, sampling `normal`/`sparse`) | **Verified — offline** | `tests/test_timeline_audit.py`: real ffmpeg/ffprobe on lavfi-generated media, including the `undetermined` failure path |
+| Adopted-timeline audit (phase anchors, labelled holds, visible window, silence ledger, version binding, stale manifest) | **Verified — offline** | Same suite: 58 cases over anonymous synthetic fixtures, each defect reproduced by a committed fixture (anchors, content binding, numeric rejection) |
+| Perceived delivery, factual semantics, "is this cut any good" | **Not judged — by design** | `audit` reports a `not_a_verdict_on` list; only a human listening/watching plus source-frame checks can settle these |
+| EDL assembly with synthetic media (real `ffmpeg`) | **Verified — offline** | `tests/test_build_sample.py`: 7 cases, lavfi fixtures, incl. the draft/audit path |
+| TTS adapter hard guarantees (no rewrite, empty/unmeasurable audio fails, no dud cache, per-node re-render) | **Verified — offline** | `tests/test_tts_guarantees.py`: 51 cases against a loopback fake endpoint |
 | TTS adapter works with **your** provider | **Unverified — by design** | Only one wire shape is targeted; no cross-vendor claim is made |
 | macOS recorder compiles and its offline checks pass | **Verified** | `tools/gamerec/tests/regression.sh` offline group: 20 checks, incl. both no-overwrite gates |
 | macOS recorder: explicit target required, **never** falls back to another app | **Verified — offline** | Regression `O1`/`O6`; the usage error fires before any permission request |
@@ -203,9 +219,9 @@ agent-gameplay-studio/
 ├── skills/gameplay-postproduction/
 │   ├── SKILL.md               # the SOP (Chinese; declares its own license: MIT)
 │   ├── references/            # canonical standard, routing, voice design, one game checklist
-│   ├── templates/             # asset register / commentary unit / timeline / review sheet
+│   ├── templates/             # asset register / commentary unit / timeline / silence ledger / review sheet
 │   ├── evals/trigger_cases.json
-│   └── scripts/check_postproduction.py   # deterministic checker, no model calls
+│   └── scripts/               # check_postproduction.py + check_timeline_audit.py (no model calls)
 ├── tools/gamerec/             # macOS app-level "target app audio + picture" recorder (Swift)
 ├── tools/voice/               # optional TTS adapter, EDL assembler, subtitle burner
 └── tests/                     # offline test suite
@@ -323,6 +339,10 @@ Three invariants are enforced by machine rather than by good intentions:
    separate columns. The checker rejects an explicitly hindsight-labelled `stated_reason`.
 3. **Verification gates export.** In EDL assembly, a narration segment that cannot fit its on-screen
    window **fails before rendering** rather than warning and exporting a mistimed cut.
+- **The narration is anchored to the phase it narrates.** A post-battle or card-pick line sitting on
+  the battle opening, a hold with no on-screen mark, a reward hold parked on a frame where the
+  candidates are already gone, or a long silence nobody justified — each is a specific, named failure
+  from `check_timeline_audit.py audit`, not a matter of taste.
 
 ### Interaction example
 
@@ -339,8 +359,10 @@ You: "把录屏整理成后期流程，给我素材登记和解说准备"   (org
      a source frame                              against frames; unmatched → `unknown`
   4. commentary units written                 → state / action / stated_reason / retrospective /
                                                 outcome / coverage, one row per occurrence
-  5. unified timeline built                   → source → clip → final, speed/freeze arithmetic
-  6. checker runs                             → structure gate, then the `ready` gate after export
+  5. unified timeline built                   → source → clip → final, speed/freeze arithmetic, plus
+                                                the phase/anchor/hold/visible-window columns
+  6. checkers run                             → preflight before narration; structure gate; `audit`
+                                                on the adopted timeline; `ready` after export
   7. review sheet                             → per-item evidence; unresolved issues block `ready`
 ```
 

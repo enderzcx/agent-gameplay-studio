@@ -11,6 +11,20 @@
 审查人/模型     ：             （模型只提供候选；结论须回源）
 ```
 
+**门槛输入（缺任一项，`ready` 直接判未就绪——它们不是可选项）**：
+
+```
+统一时间线 timeline.tsv          ：   （必须带 anchor_asset/anchor_event/anchor_source 与三份内容摘要）
+素材预检   preflight.json         ：   （check_timeline_audit.py preflight --out 生成）
+静默台账   gaps.tsv               ：   （每段 ≥ 阈值的无口播逐段给 keep/cut/narration_added + 依据）
+实际字幕   subs.srt               ：   （内容 hash 与逐条文本/时点都要与这一版时间线一致）
+实际音轨   voice_master.wav       ：   （内容 hash 与时长都要与这一版时间线一致）
+实际成片   final.mp4              ：   （内容 hash、时长、音轨都要与这一版时间线一致）
+```
+
+> 预检里的源音轨状态（`present` / `silent` / `absent`）与采集密度（`normal` / `sparse`）要**照抄探测结果**，
+> 不要手填。`silent` 是"音轨在但没有信号"，不是"有游戏原声"；`sparse` 是源属性，不代表画质可以声称流畅。
+
 ## A. 文件与时间线
 
 | # | 检查项 | 结果 | 证据（命令输出/帧号/时间码） |
@@ -20,6 +34,8 @@
 | A3 | 音轨存在、与画面同步 | 是 / 否 | |
 | A4 | 三档时间映射自洽（源→片段→成片），同一次偏移只加一次 | 是 / 否 | |
 | A5 | 无**非预期**黑屏/冻结/丢帧；**已登记的定格是剪辑手段，不算缺陷** | 是 / 否 | |
+| A6 | 时间线语义审计通过：锚点与画面源区间交叉核对 / 保持帧标注与可见区间 / 静默逐段依据 / **内容级版本绑定**（字幕文本与时点、音轨与成片的 hash）/ 素材台账非 stale | 是 / 否 | `check_timeline_audit.py audit` 退出码 + `audit-report.json`（**现场重跑**，不接受外部报告替代） |
+| A7 | 源输入状态已预检且明确（音轨 present/silent/absent、采集 normal/sparse） | 是 / 否 | `preflight.json` |
 
 ## B. 单元覆盖（按素材实际发生判断）
 
@@ -137,9 +153,19 @@ rec-01   | ev-008   | 478.5-496.0  | 20.8-41.3   | 1x + 定格3s  | "选剑柄�
 机器校验（结构项）：
 
 ```bash
-S="$HOME/.agents/skills/gameplay-postproduction"
-python3 "$S/scripts/check_postproduction.py" sheet "review-sheet.md"   # 输入格式：Markdown
+S="skills/gameplay-postproduction/scripts"          # 或用你宿主的安装路径
+python3 "$S/check_postproduction.py" sheet "review-sheet.md"   # 输入格式：Markdown
 # 注意：sheet 通过只代表"结构合法"，不代表审片通过。
-# 交付前用 ready 门槛（会独立探测末段 MP4）：
-python3 "$S/scripts/check_postproduction.py" ready "review-sheet.md" --final-mp4 "/abs/final.mp4"
+# 交付前用 ready 门槛：它会独立探测末段 MP4，并强制跑一遍采用时间线语义审计。
+python3 "$S/check_postproduction.py" ready "review-sheet.md" --final-mp4 "/abs/final.mp4" \
+    --timeline timeline.tsv --preflight preflight.json \
+    --silence-ledger gaps.tsv --subtitle subs.srt --audio voice_master.wav
 ```
+
+`ready` 的通过语义是"**这份单子可以当作已审片交付**"，不是"内容好"：它不看画面、不听音轨，
+也不裁定听感与事实语义。那些项仍由本单的 E7–E9 / D 段靠人核。
+
+`ready` **不会**采信任何"现成的审计 JSON"：它总是现场重跑审计；缺任一媒体参数
+（timeline / preflight / silence-ledger / subtitle / audio / final-mp4）都判未就绪。
+`tools/voice/build_sample.sh` 走的是同一套：没给审计输入时，它的产物会带 `DRAFT.txt` 标记，
+明确"不可交付"。
