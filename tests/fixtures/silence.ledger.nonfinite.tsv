@@ -1,0 +1,5 @@
+# SYNTHETIC FIXTURE - fabricated data. Silence ledger for timeline.audit.ok.tsv.
+# Ranges come from the ACTUAL narration spans (real offset included), merged as a union.
+gap_id	final_range	disposition	reason
+g-001	nan-34.000	keep	a non-finite range that must be rejected
+g-002	40.000-62.250	narration_added	a line was added over the shop comparison; the residual hold is the comparison itself

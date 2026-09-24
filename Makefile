@@ -3,9 +3,10 @@
 
 PY ?= python3
 C  := skills/gameplay-postproduction/scripts/check_postproduction.py
+A  := skills/gameplay-postproduction/scripts/check_timeline_audit.py
 
 .DEFAULT_GOAL := help
-.PHONY: help check test-checker test-assembly test-tts recorder recorder-offline check-examples clean
+.PHONY: help check test-checker test-audit test-assembly test-tts recorder recorder-offline check-examples clean
 
 help:  ## Show this help
 	@echo "agent-gameplay-studio — available targets:"
@@ -15,12 +16,15 @@ help:  ## Show this help
 	@echo "Full offline verification:  make check"
 	@echo "Structure-only examples:    make check-examples"
 
-check: test-checker test-assembly test-tts  ## Run every offline test (no network, no keys, no game)
+check: test-checker test-audit test-assembly test-tts  ## Run every offline test (no network, no keys, no game)
 	@echo
 	@echo "offline tests: OK"
 
 test-checker:  ## Deterministic checker: structure modes, ready gate, and negative cases
 	$(PY) tests/test_check_postproduction.py
+
+test-audit:  ## Input preflight + adopted-timeline audit on anonymous synthetic fixtures
+	$(PY) tests/test_timeline_audit.py
 
 test-assembly:  ## EDL assembler smoke test on synthetic media (real ffmpeg)
 	$(PY) tests/test_build_sample.py

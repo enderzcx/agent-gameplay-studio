@@ -21,6 +21,11 @@
 #
 # 环境变量（**没有私有默认值**，源视频必须显式给）：
 #   SRC_VIDEO   源录屏文件（必需）
+#   TIMELINE / PREFLIGHT / SILENCE_LEDGER   可选：给了就在导出后**现场跑采用时间线审计**
+#               （与 `ready` 门槛同一个 checker、同一套规则），并在制作完成的这一刻写出
+#               `produce-receipt.json`（把 timeline 与字幕/音轨/成片绑在同一制作上）。
+#               审计不过 → 退出 3，并写出 `DRAFT.txt`；没给 → 产物一律标为
+#               **DRAFT（不可交付）**，见文件末尾。
 #   SRC_CROP    源画面的裁剪/缩放滤镜链，默认 scale=960:-2（等宽等比）。
 #               若源片里混入了带答案的辅助面板，必须在这里显式裁掉。
 #   OUT_FPS     输出帧率，默认 30（降采样，不补帧）
@@ -39,6 +44,19 @@
 set -euo pipefail
 
 TL="${1:?edl tsv}"; VDIR="${2:?voice dir}"; OUT="${3:?out dir}"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PRODUCE="$HERE/produce_timeline.py"
+
+# 未通过采用时间线审计的产物一律标 draft：没有这个标记就不许当成可交付。
+draft() {
+  {
+    echo "DRAFT - NOT DELIVERABLE"
+    echo "reason: $1"
+    echo "见 $OUT/audit-report.json 或上面的 stdout/stderr。"
+  } > "$OUT/DRAFT.txt"
+  echo "!! $1" >&2
+  echo "!! 产物留在 $OUT，已标记为 draft，不是可交付成片。" >&2
+}
 SRC="${SRC_VIDEO:?必须显式给源视频：SRC_VIDEO=/path/to/source.mp4（本脚本不内置任何私有默认路径）}"
 CROP="${SRC_CROP:-scale=960:-2}"           # 默认等比缩到宽 960；混入带答案的面板时必须显式裁掉
 FPS="${OUT_FPS:-30}"                       # 降采样，不补帧
@@ -109,10 +127,30 @@ print(f"预检通过：{len(rows)} 段，最大余量 "
       f"{min(planned-(off+adur) for _,planned,adur,off,_ in rows):.3f}s")
 PY
 
+# ---------------------------------------------------------------- 制作前交叉核对
+# 需要 recipe（TIMELINE）+ preflight 才会走 adopted 路径；否则产物只能是 draft。
+WANT_ADOPT=0
+if [ -n "${TIMELINE:-}" ] && [ -n "${PREFLIGHT:-}" ] && [ -f "$PRODUCE" ]; then
+  mkdir -p "$OUT"
+  echo "--- 制作前交叉核对（recipe ↔ EDL ↔ preflight ↔ 真实 SRC_VIDEO）---"
+  if python3 "$PRODUCE" plan --recipe "$TIMELINE" --edl "$TL" --preflight "$PREFLIGHT" \
+       --src-video "$SRC" --voice-dir "$VDIR" --out-dir "$OUT"; then
+    WANT_ADOPT=1
+  else
+    mkdir -p "$OUT"
+    draft "制作前交叉核对未通过：recipe/EDL/preflight/源视频对不上（没有渲染，也没有猜）"
+    exit 3
+  fi
+fi
+
 # ---------------------------------------------------------------- 制作
 mkdir -p "$OUT/concat" "$OUT/seg_norm"
 OUT="$(cd "$OUT" && pwd)"   # 绝对路径：ffmpeg concat 按列表文件所在目录解析相对路径
 : > "$OUT/concat/video.txt"; : > "$OUT/concat/audio.txt"; : > "$OUT/subs.srt"
+MEASURED="$OUT/adopt/measured.tsv"
+if [ "$WANT_ADOPT" -eq 1 ]; then
+  printf 'seg\twindow\tnarration_duration\toffset\tfinal_start\tfinal_end\n' > "$MEASURED"
+fi
 t_cursor=0; i=0
 
 hh() { python3 -c "import sys;m=int(sys.argv[1]);print('%02d:%02d:%02d,%03d'%(m//3600000,m//60000%60,m//1000%60,m%1000))" "$1"; }
@@ -125,7 +163,14 @@ tail -n +2 "$TL" | while IFS=$'\t' read -r seg ss se afile off freeze text; do
   # 画面几何完全由 SRC_CROP 决定：这里不再追加硬编码的 scale，
   # 否则会盖掉调用方的裁剪/缩放意图（旧版把 960x966 写死在这里）。
   vf="${CROP},fps=${FPS}"
-  if python3 -c "import sys;sys.exit(0 if float('$freeze')>0 else 1)"; then
+  mark_file="$OUT/adopt/mark-$n.txt"
+  if [ -f "$mark_file" ]; then
+    # 支持的定格：冻的是片段末帧（plan 已经核对过 anchor == src_end），
+    # 并且**真的**把保持标注烧进画面（不是只在表格里写一行 mark）。
+    srclen=$(python3 -c "print(round(float('$se')-float('$ss'),6))")
+    vf="${vf},tpad=stop_mode=clone:stop_duration=${freeze}"
+    vf="${vf},drawtext=textfile='${mark_file}':x=10:y=h-th-10:fontsize=18:fontcolor=white:box=1:boxcolor=black@0.65:enable='gte(t,${srclen})'"
+  elif python3 -c "import sys;sys.exit(0 if float('$freeze')>0 else 1)"; then
     vf="${vf},tpad=stop_mode=clone:stop_duration=${freeze}"   # 显式登记的定格
   fi
   vf="${vf},format=yuv420p"
@@ -164,6 +209,11 @@ tail -n +2 "$TL" | while IFS=$'\t' read -r seg ss se afile off freeze text; do
   fi
   printf "file '%s'\n" "$anorm" >> "$OUT/concat/audio.txt"
 
+  if [ "$WANT_ADOPT" -eq 1 ]; then
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$i" "$cdur" "$adur" "$off" "$t_cursor" \
+      "$(python3 -c "print(round(float('$t_cursor')+float('$cdur'),6))")" >> "$MEASURED"
+  fi
+
   # 没有口播的行（例如纯画面收尾）不写字幕
   if [ -n "${text// /}" ]; then
     ms=$(python3 -c "print(int((float('$t_cursor')+float('$off'))*1000))")
@@ -199,3 +249,55 @@ ffmpeg -nostdin -v error -y -i "$OUT/video_raw.mp4" -i "$OUT/voice_master.wav" \
   -map 0:v -map 1:a -c:v copy -c:a aac -b:a 192k -shortest "$OUT/final.mp4"
 echo "final: $OUT/final.mp4"
 ffprobe -v error -show_entries format=duration,size -show_entries stream=codec_type,codec_name,width,height,sample_rate,channels -of default=nw=1 "$OUT/final.mp4"
+
+# ---------------------------------------------------------------- 采用时间线审计（默认验收路径）
+# 这里调用的是 `ready` 门槛用的**同一个** checker 与**同一套**规则：锚点与画面源区间交叉核对、
+# 阶段声明、按实际声段的静默依据、内容级版本绑定 + 制作 receipt、stale 素材台账。
+# adopted-timeline.tsv 是**从真实 EDL 与实测结果**生成的那一份，不是叫调用方盲改自己的输入。
+AUDIT="$HERE/../../skills/gameplay-postproduction/scripts/check_timeline_audit.py"
+SUBS_FILE="${SUBS:-$OUT/subs.srt}"
+if [ "$WANT_ADOPT" -eq 1 ] && [ -n "${SILENCE_LEDGER:-}" ] && [ -f "$AUDIT" ]; then
+  if ! python3 "$PRODUCE" adopt --out-dir "$OUT" --measured "$MEASURED" --edl "$TL" \
+       --src-video "$SRC" --subs "$SUBS_FILE" --audio "$OUT/voice_master.wav" \
+       --final "$OUT/final.mp4" \
+       --produced-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"; then
+    draft "制作后无法生成 adopted timeline / receipt"
+    exit 3
+  fi
+  echo "--- 采用时间线审计（$OUT/adopted-timeline.tsv）---"
+  if python3 "$AUDIT" audit "$OUT/adopted-timeline.tsv" --preflight "$PREFLIGHT" \
+       --silence-ledger "$SILENCE_LEDGER" --subtitle "$SUBS_FILE" \
+       --audio "$OUT/voice_master.wav" --final-mp4 "$OUT/final.mp4" \
+       --receipt "$OUT/produce-receipt.json" --edl "$TL" \
+       --report-out "$OUT/audit-report.json"; then
+    rm -f "$OUT/DRAFT.txt"
+    echo "审计通过：$OUT/audit-report.json（≠ 审片通过；听感与事实语义仍需人核）"
+    echo "交付前再过 ready 门槛（单子 + adopted-timeline.tsv + 同一套输入 + receipt）。"
+  else
+    draft "采用时间线审计未通过"
+    exit 3
+  fi
+else
+  mkdir -p "$OUT"
+  cat > "$OUT/DRAFT.txt" <<'DRAFTEOF'
+DRAFT - NOT DELIVERABLE
+This cut was assembled WITHOUT the adopted-timeline audit: TIMELINE (recipe) / PREFLIGHT /
+SILENCE_LEDGER were not all provided, or this ffmpeg has no audit checker next to it. This builder
+can only produce a deliverable cut through the adopted-timeline path, because the final subtitle /
+audio / cut digests cannot be known before they exist and a generic timeline cannot be trusted to
+match the EDL it claims to describe. Anchoring, phase, holds, silence and version binding are
+therefore UNCHECKED. This output is a draft only.
+
+Make it deliverable (one invocation, no re-render needed):
+  TIMELINE=recipe.tsv PREFLIGHT=preflight.json SILENCE_LEDGER=gaps.tsv \
+    SRC_VIDEO=/abs/source.mp4 build_sample.sh <edl.tsv> <voice_dir> <out_dir>
+  # build_sample writes <out_dir>/adopted-timeline.tsv + produce-receipt.json, then audits them.
+  # the delivery gate then re-runs the same audit:
+  python3 <repo>/skills/gameplay-postproduction/scripts/check_postproduction.py ready sheet.md \
+      --final-mp4 <out_dir>/final.mp4 --timeline <out_dir>/adopted-timeline.tsv \
+      --preflight preflight.json --silence-ledger gaps.tsv --subtitle <out_dir>/subs.srt \
+      --audio <out_dir>/voice_master.wav --receipt <out_dir>/produce-receipt.json --edl <edl.tsv>
+DRAFTEOF
+  echo "!! DRAFT ONLY：没有同时提供 TIMELINE / PREFLIGHT / SILENCE_LEDGER，" >&2
+  echo "   本产物**未过采用时间线审计**，已写出 $OUT/DRAFT.txt；交付前必须过 ready 门槛。" >&2
+fi

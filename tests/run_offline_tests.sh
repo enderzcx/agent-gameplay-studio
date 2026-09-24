@@ -17,15 +17,19 @@ need python3
 need ffmpeg
 need ffprobe
 
-echo "── 1/3 postproduction checker（结构 / 就绪门槛 / 反例）"
+echo "── 1/4 postproduction checker（结构 / 就绪门槛 / 反例）"
 python3 "$ROOT/tests/test_check_postproduction.py" || fail=1
 
 echo
-echo "── 2/3 voice assembly smoke（合成素材，真 ffmpeg 组装）"
+echo "── 2/4 input preflight + adopted-timeline audit（阶段锚点 / 保持帧 / 静默依据 / stale 台账）"
+python3 "$ROOT/tests/test_timeline_audit.py" || fail=1
+
+echo
+echo "── 3/4 voice assembly smoke（合成素材，真 ffmpeg 组装）"
 python3 "$ROOT/tests/test_build_sample.py" || fail=1
 
 echo
-echo "── 3/3 TTS 硬保证（本地假端点，不出网：不改稿 / 空音频失败 / 测不出时长失败）"
+echo "── 4/4 TTS 硬保证（本地假端点，不出网：不改稿 / 空音频失败 / 测不出时长失败 / 只重算改变节点）"
 python3 "$ROOT/tests/test_tts_guarantees.py" || fail=1
 
 echo

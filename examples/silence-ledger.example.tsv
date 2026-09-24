@@ -1,0 +1,7 @@
+# SYNTHETIC EXAMPLE - fabricated data, not a real match.
+# Silence ledger for examples/timeline.example.tsv: every silent stretch >= the threshold
+# (default 20 s) needs one row saying why it is kept, cut, or how narration was added.
+# disposition: keep (画面自解释) | cut (已剪掉，因此不得再被检出) | narration_added (已补讲)
+# reason must be substantive - a placeholder is rejected by the audit.
+gap_id	final_range	disposition	reason
+g-example-001	41.300-62.300	keep	该段为原速战斗结算与地图切换，保留了关键回合与奖励画面，不放旁白

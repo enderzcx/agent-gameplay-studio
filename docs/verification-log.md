@@ -12,7 +12,9 @@ only** and talks to it over loopback. No packet leaves the machine and no remote
 
 ---
 
-## 1. Offline test suite — 74 cases
+## 1. Offline test suite at 0.1.0 — 74 cases
+
+> Historical record for the published 0.1.0 revision. The suite is now **204** cases; see §9.
 
 ```
 $ make check
@@ -78,7 +80,7 @@ python3 tests/test_tts_guarantees.py
 offline tests: OK
 ```
 
-**74 cases, 0 failures.** The `ready` cases build a throwaway MP4 with `ffmpeg` lavfi sources in a
+**74 cases, 0 failures (at 0.1.0).** The `ready` cases build a throwaway MP4 with `ffmpeg` lavfi sources in a
 temp directory and delete it afterwards; the TTS cases use a throwaway loopback endpoint. Nothing is
 written into the repository.
 
@@ -292,7 +294,7 @@ Verifying this claim from a clone is one command:
 git log -1 --format='%an <%ae> | committer %cn <%ce>'
 ```
 
-## 8. Fresh-snapshot verification
+## 8. Fresh-snapshot verification (0.1.0 record)
 
 Local runs can be flattered by leftovers — an untracked file, a stale build directory, or an exported
 environment variable — so the README entry points were re-run on **two independent pristine
@@ -309,7 +311,7 @@ untracked files, no ignored files. Verified before running: 41 files present, **
 | Entry point (exactly as the README documents it) | Snapshot A | Snapshot B |
 |---|---|---|
 | `make help` | exit 0 | exit 0 |
-| `make check` (22 + 4 + 48 cases) | all pass, exit 0 | `offline tests: OK`, exit 0 |
+| `make check` (32 + 112 + 9 + 51 cases) | all pass, exit 0 | `offline tests: OK`, exit 0 |
 | `make check-examples` | exit 0 | exit 0 |
 | `make recorder-offline` (compiles the Swift recorder from scratch) | builds, **20 passed / 0 failed / 7 skipped**, exit 0 | same |
 | `tests/run_offline_tests.sh` | `离线测试全部通过`, exit 0 | same |
@@ -324,7 +326,80 @@ always-failing shim on `PATH`, `test_tts_guarantees.py` exits **non-zero**. The 
 genuinely depends on the tool it claims to use, rather than catching an exception and reporting
 success.
 
-## 9. Publish boundary
+## 9. Workflow hardening (2026-09-24) — what was actually run
+
+The suite grew from 74 to **204 offline cases**; the numbers below are the raw tail of each run.
+
+```
+$ python3 tests/test_check_postproduction.py
+  ... 32 passed, 0 failed
+$ python3 tests/test_timeline_audit.py
+  ... 112 passed, 0 failed
+$ python3 tests/test_build_sample.py
+  全部通过（9 项）
+$ python3 tests/test_tts_guarantees.py
+  ... 51 passed, 0 failed
+```
+
+**Red-first evidence.** The five defective timelines now under `tests/fixtures/` were first run
+through the *unmodified* checker at the pre-change HEAD (`6e88382`). All five passed it with
+**zero errors** — `check_postproduction.py timeline` returned `rc=0` for the phase-mismatch,
+unlabelled-hold, hold-outside-visible-window, overlong-narration and mixed-version fixtures — and
+there was no mode able to request `preflight` or `audit` at all. That gap is asserted inside the
+suite itself (`structure mode still accepts the … fixture (the gap this suite closes)`), so a future
+change that silently reopens it fails the tests. The raw before output is mirrored with this
+revision's review packet.
+
+**Negative controls.** Every new rule has a case that must fail: phase claimed ahead of the picture;
+a line anchored to a different event at the same phase; an anchor interval outside the shot; a
+cross-turn shot whose line does not cover the span; NaN and negative anchor intervals; `freeze > 0`
+with no mark; reward anchor outside `visible_window`; narration longer than its window; two
+`subtitle_source` values; a same-cue-count subtitle that was re-worded, or re-timed out of its
+segment; a replaced audio track and an older export of the same length (content-hash binding); a
+missing final cut; each media parameter omitted in turn; a missing, stale, self-contradicting or
+non-finite silence ledger; `--tol nan`, `--tol -1`, `--silence-threshold nan`, `--silence-threshold
+-5`, `--min-fps inf` as usage errors; a tampered preflight digest (stale manifest); a removed source
+file; and a non-media file that cannot be probed (`status: undetermined`).
+
+**Second review round (same day).** An independent read-back found concrete defects that are now
+fixed and covered: silence was computed from picture windows instead of the real audio spans; the
+per-cue subtitle text/timing was not compared in the revision the reviewer read; `--audio` was not
+checked for an actual audio stream; `ready` neither received the final cut for a same-length
+comparison nor validated `--silence-threshold`, and it dropped the audit's warnings/`unverified`;
+`-show_entries` used `&` instead of `:` and silently lost the `format` block; `measure_audio_signal`
+ignored a non-zero `ffmpeg` exit; `source_path` was stored as given, so changing cwd could misjudge
+it; the global phase order was treated as a timeline; and four matching digests did not prove the
+artifacts came from one production. Each has a regression case, including a receipt bound to a
+different timeline, a 1 s line on a 66 s shot (65 s of silence, ratio 1/66), an `--audio` file with
+no audio stream, and a 5 s sheet+MP4 paired with a valid 66 s timeline/audio.
+
+**Round 3 (production path).** The recipient of round 3's review was the authoring path: the
+first build could not know the output digests, so the old flow implied a second render; the receipt
+copied the preflight ledger instead of recording what was actually read; silence still summed
+per-segment spans rather than the merged union; a one-cue subtitle only had to sit inside its span;
+and `hold_mark` was never actually applied to the picture. Each is fixed and covered:
+`test_first_build_closes_the_loop_in_one_invocation` (clean dir, placeholders in the recipe, one
+invocation, adopted timeline with real digests), `A/B source mismatch` and `recipe/EDL source-range
+and offset mismatches` failing before rendering, the squeezed-subtitle case failing on the default
+path, and the freeze case either annotated for real (when `drawtext` exists) or explicitly
+fail-closed with `DRAFT.txt` (this machine has no `drawtext`, and the suite asserts that path).
+
+**The authoring path is covered too.** `test_build_sample.py` builds a real cut through
+`build_sample.sh`: without the audit inputs the output is stamped `DRAFT.txt` and the script says so
+on stderr; with a defective timeline the script exits non-zero and still stamps the draft; with a
+timeline bound to the produced artifacts the audit passes, the report is written and the draft mark
+is cleared.
+
+**Real ffmpeg, no committed binaries.** `tests/test_timeline_audit.py` generates 20 s / 6 s video and
+a 66 s audio track with lavfi at test time, runs the real `preflight` over them, then audits the
+fixtures against that ledger. Nothing binary is committed, no model is called, and no network egress
+occurs.
+
+**Not claimed.** The audit does not watch the picture or listen to the audio: perceived delivery,
+intonation and factual semantics remain human/source-frame checks, and the report carries them in
+`not_a_verdict_on`. The audit's own pass is a statement about the timeline, not about the cut.
+
+## 10. Publish boundary
 
 This revision performed **local `git init` + `git commit` only**. No remote was added or configured,
 no `git push` was run, and nothing was created on any hosting provider. The full staged tree, the
@@ -345,3 +420,12 @@ tracked-file manifest, and a relative-path mirror of the tree are provided for i
   in the sheet. A fully verified sheet therefore still needs that line. Behaviour is **unchanged**
   from the installed skill so the exported checker is byte-identical to the artifact it describes;
   it is recorded in `CHANGELOG.md` rather than silently patched.
+- The adopted-timeline audit (`check_timeline_audit.py audit`) judges **the timeline**, not the cut.
+  It does not watch the picture or listen to the audio, so perceived delivery, intonation, and factual
+  semantics stay human/source-frame checks; the report lists them under `not_a_verdict_on`. A green
+  audit is not "the cut is good".
+- The audit's phase rule is ordinal (`setup < battle < reward < map < shop < rest < event < other`).
+  `other` sorts last, so a line whose phase is genuinely unknown should be left out of `claim_phase`
+  rather than guessed; this ordering is a deliberate simplification, not a model of every game's flow.
+- The silence threshold (default 20 s) is a *policy* number chosen for one project's pace. It is a
+  CLI flag, not a universal law, and changing it changes which stretches need justifying.

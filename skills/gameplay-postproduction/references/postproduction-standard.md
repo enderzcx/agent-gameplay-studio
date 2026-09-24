@@ -31,6 +31,33 @@
 3. **脱敏**：录制前关闭/移出含密钥、token、私人对话、真实姓名的窗口。日志与素材不得出现密钥。
 4. 分辨率与帧率按成片目标设定；**不要**为了省空间预先抽帧或降帧——原速原始素材是唯一可信时间基。
 
+### 1.1 开录后、写旁白前的输入预检（机器判定，不靠人填）
+
+素材入库前用确定性探测把**输入状态**写成台账，不要等到审片才发现：
+
+```bash
+A=skills/gameplay-postproduction/scripts/check_timeline_audit.py
+python3 "$A" preflight --json --out preflight.json rec-both=/abs/both.mp4 rec-win=/abs/win.mp4
+```
+
+台账逐素材给出：`sha256`、`size_bytes`、`duration_s`、**实测帧率**（帧数÷时长，不是容器声明的
+`r_frame_rate`）、`has_video`、`has_audio`、`audio_signal ∈ present|silent|absent`、
+`frame_sampling ∈ normal|sparse`、`status ∈ determined|undetermined`。
+
+口径（三条都容易搞错）：
+
+- **`silent` ≠ `absent`。** 有音轨但 `max_volume` 低于阈值是"**静音音轨**"，不是"有游戏原声"；
+  必须查明是目标自身静音、抓错目标还是权限问题。`absent`（真的没有音轨）是**允许**的
+  （有意静音源），但**不得编造源音**，成片音轨仍必须存在。
+- **稀疏采集是源属性，不是剪辑缺陷。** 约 1.5 fps 的合成录制按真实速度播放是**时间正确**，
+  但运动信息本来就少：不得据此声称画面动感充足，**不得靠插帧假装流畅**，也不得把它当成
+  "剪辑又插了静帧"。
+- **`undetermined` 一律不得当作通过。** 探测不出来（拿不到帧数、量不到音轨信号）就**非 0 退出**，
+  先修可读性再继续；`audit` 与 `ready` 都会因此判未就绪。
+
+这份台账同时是 `audit` 的输入：它记的 `sha256`/`size_bytes` 之后会被拿来与磁盘**重新比对**，
+所以它也是"素材有没有换过"的唯一凭据（见 §4.4）。
+
 ---
 
 ## 2. 素材登记（唯一时间基）
@@ -59,7 +86,8 @@ outcome(实际结果)
 - **先检查素材覆盖**：某段只在日志里出现、原始画面缺失时，**不要用日志替代缺失画面**——
   标记 `coverage_gap`，该单元不得进入成片解说。
 
-模板：`templates/asset-register.md`
+模板：`templates/asset-register.md`；机器可读版本由 §1.1 的 `preflight --out` 生成
+（两者冲突时以**实际探测**为准，手填的 `has_audio` 不得覆盖探测结果）。
 
 ---
 
@@ -145,6 +173,171 @@ outcome(实际结果)
 
 模板：`templates/timeline.md`　检查：`scripts/check_postproduction.py timeline <file>`
 
+### 4.1 三档时间的含义不许互相顶替
+
+| 时间 | 含义 | 谁可以改 |
+|---|---|---|
+| `source_range` | **源时间基**：素材里真实发生的区间。任何速度/冻结都**不改**它 | 只有素材本身 |
+| `clip_range` | **片段时间基**：切出来的片段自身从 0 起算，长度 == `source_range` 长度 | 切片段 |
+| `final_range` | **成片时间基**：实际装配后的位置，长度 = `clip` ÷ speed + freeze | 装配 |
+
+速度与冻结**只**影响 `final`。字幕、音轨与一切版本标识**都从这一份实际采用的时间线生成**——
+不允许"字幕另算一套时间"或"音轨按旧版稿生成"。审计会核对：
+
+- 全片只有一个 `subtitle_source`（多版本混用直接失败）；
+- 本契约是 **1 cue ↔ 1 旁白行**：字幕 cue 的起止必须**贴合**该行声段（含真实 offset，容差 `--tol`），
+  "落在声段里面"不算——整句压成末尾 0.1s 会被拒；
+- 时间线自带 `subtitle_sha256` / `audio_sha256` / `final_sha256` 三份**内容摘要**；
+- 字幕文件的内容摘要 == 声明值；字幕段数 == 旁白行数；**逐条**字幕文本 == 该行口播稿，
+  且起止落在该行的成片区间之内；
+- 音轨内容摘要 == 声明值，且音轨时长 == 时间线总长（容差内）；
+- 成片内容摘要 == 声明值，时长 == 总长（容差内），且确实带音轨。
+
+**只数字幕段数、音轨时长，或只 hash 输入原片都不够**：同样 74 段但改了词或改了时间的 SRT、
+上一版的音轨、上一版的 MP4，都会在这套绑定下失败。`audit` 把 **timeline ↔ 字幕 ↔ 音轨 ↔ 成片**
+绑成同一版本，并把四份摘要写进报告。
+
+`ready` 门槛**不接收**任何"现成的审计 JSON"：它总是现场重跑一遍审计，
+所以一份过期或伪造的独立报告不能替代现场判定。`ready` 还会把审计的 warnings / `unverified`
+原样带进自己的产物——无原声、稀疏采集、人工声明项这些限制**不允许在门槛里被吞掉**。
+
+### 4.1.1 recipe → adopted：首次制作不许为了拿摘要重跑一遍
+
+三份输出的内容摘要在**产出之前根本不存在**。所以：
+
+- **输入 recipe 允许占位**（`@PENDING@` / `-`）；它由人写语义字段（阶段、锚点、口播稿……）；
+- 制作路径（`tools/voice/build_sample.sh`）在收尾时从**真实 EDL + 实测片段/声长**生成一份
+  **新的** `adopted-timeline.tsv`：把占位换成实际摘要、补上真实 `audio_offset_s` 与
+  `hold_burned_in`，并核对 recipe 与 EDL 一致（镜头顺序、源区间、1x speed、freeze、
+  口播文本、实测声长、offset）；
+- 交付给 `ready` 的是这份 **adopted** 版本，**adopted 输出不允许占位**；
+- 因此**首次一次 build 就能闭环**，不需要"先跑一遍拿摘要、填回 recipe、再跑一遍"——那是重复渲染。
+
+**本组装器支持的形态（超出就明确失败并保持 draft，不假装通用）**：单源视频、1x 速度、
+EDL 的 `src_start/src_end/offset/freeze/字幕文本`，以及能把标注烧进画面的 freeze
+（需要 ffmpeg 的 `drawtext`）。变速、多源拼接、复杂转场交给你自己的编辑器。
+
+### 4.1.2 制作 receipt：同一次制作的绑定
+
+四份内容摘要只说明"时间线里写的 hash == 现在磁盘上的文件"，**不说明这些产物是同一次做出来的**：
+拿一份旧成片、再手写一份声称旧 hash 的时间线，也能对上。所以交付时还要一份
+`produce-receipt.json`，由**制作路径在产出那一刻**写出（`build_sample.sh` 已自动写）：
+
+```json
+{ "schema": "gameplay-postproduction/produce-receipt/1",
+  "produced_by": "tools/voice/build_sample.sh", "produced_at": "…",
+  "timeline": {"sha256": "…"}, "subtitle": {"sha256": "…"},
+  "audio": {"sha256": "…"}, "final": {"sha256": "…"},
+  "sources": {"rec-win": "…"} }
+```
+
+审计会核对：receipt 里的 timeline 摘要 == 这一份 timeline；三份产物摘要 == 现在的文件；
+**`source_video` 的摘要 ∈ timeline 用到的素材（preflight 台账）**；`sources` 与台账逐条一致；
+给了 `--edl` 时还要 receipt 的 EDL 摘要与它相符。任何一条不符 → "不是同一次制作"。
+
+> 为什么还要 `source_video`：只把 preflight 台账抄进 receipt 是不够的——
+> 台账写 A、实际 `SRC_VIDEO` 给的是 B（同长不同画面），抄出来的 receipt 依然"自洽"。
+> 制作路径现在在**渲染前**就核对 `sha256(SRC_VIDEO)` 与台账里那个 asset 一致，并把**实际读过**的
+> 摘要写进 receipt。
+
+**边界要说清楚**：receipt **没有签名**，防不了蓄意伪造。它的作用是让"复用旧媒体 + 新造声明"
+变成一次明显的、会被逐条比对拦下的不一致，而不是一个默认通过的路径。
+
+### 4.2 锚点交叉核对：旁白说的那一刻必须在画面上
+
+阶段只是粗粒度。同属 `battle` 的第 6 场和第 7 场是**不同事件**，把一场的台词挂到另一场的画面上，
+阶段检查看不出来。所以每个旁白行都要显式声明它引用的 **(素材, 回合, 源区间)**：
+
+```
+anchor_asset  | anchor_event  | anchor_source
+rec-win       | f31           | 1389.0-1393.0
+```
+
+审计逐行核对，且**只信这一行真实画面的源区间**：
+
+- `anchor_asset` 必须等于本行 `asset_id`（跨素材锚点机器无法核验 → 直接失败）；
+- `anchor_event` 必须是本行 `event_id` 的子集。单事件镜头把旁白挂到别的事件上 → **失败**
+  （这就是"换了同 phase 但不同 event 默默过"）；
+- `anchor_source` 必须落在本行 `source_range` **之内** —— 说的那一刻没在画面上就失败。
+  1.2 秒的动作配 25.76 秒的口播，只要按真实跨度填 `anchor_source` 就必然失败；
+  声明了锚点不等于锚点被证实：`evidence` / `anchor_*` 都是**人工声明**，机器只核对它们与画面源区间自洽；
+- **跨回合句**：把该行 `event_id` 写成一个 `+` 连接的集合（`h03_f33c+a07_c31b`）来**显式声明**
+  这一镜覆盖了哪几个回合；此时 `anchor_source` 必须覆盖整个镜头跨度，即"跨回合句必须由连续画面承载"。
+  被声明过的跨回合镜头会在报告里留一条 `unverified`（机器只认区间覆盖，不认画面里到底是哪几回合）。
+
+`evidence` 仍然是必填的**人写来源说明**（源帧时间码等），但要说清楚：**它是声明，不是证据**。
+审计报告里有 `human_annotations_not_machine_verified` 专门列出"机器核对不了、只能靠人填"的字段，
+不要把"填了"当成"证过了"。
+
+### 4.3 阶段：跨阶段必须显式声明，全局顺序不是时间轴
+
+`PHASE_ORDER`（`setup < battle < reward < map < shop < rest < event < other`）只是**枚举顺序**，
+不是时间轴：循环类游戏里 map → battle → reward → map 会反复出现，把 phase 排成一条全局序列
+并不成立。因此规则是：
+
+- `claim_phase == event_phase` → `claim_mode: live`；
+- **跨阶段**（`claim_phase != event_phase`）→ 必须显式写 `claim_mode: retrospective`，
+  并让 `anchor_event` 指到具体回合。没写就是失败——不允许靠"顺序早于"默认放行。
+  报告会把这类行记进 `phase_crossings` 与 `unverified`（机器不核对这段回顾是否属实）。
+- 唯一保留的顺序判定是**同一事件内部**的"提前讲结果"：
+  `len(event_id)==1`、`anchor_event ⊆ event_id`、且 `claim_phase` 在枚举上晚于 `event_phase`
+  → 失败。这就是原始缺陷「战斗还没打完就在说打完了、我拿了 X」。
+  修法是把台词移到真实发生的那一段，或让这一镜真的覆盖那个事件（`event_id=a+b`）。
+
+### 4.4 保持帧：连续动作优先，无标注的长静帧不许用来填配音
+
+- 一段长旁白**优先配连续真实动作**，不要"1.2 秒动作 + 25 秒不动"。
+- `speed/freeze` 里登记了冻结（`freeze > 0`），就必须有 `hold_mark`，且标注里要写出
+  **被保持的是哪一帧的源时间码**。没有标注的长静帧 = 失败。理由：观众分不清
+  "这是有意定格"还是"渲染卡住了"，而复盘时也分不清它是有意为之还是漏剪。
+- 还要 `hold_burned_in: yes`：**表格里有 mark 不等于画面已标注**。制作路径（`build_sample.sh`）
+  只能用片段末帧做定格——声明的锚点必须就是那一帧，否则它会明确失败并保持 draft
+  （复杂定格交给你自己的编辑器）；本机 ffmpeg 没有 `drawtext` 时同样 fail-closed。
+- 保持帧锚点还要落在**旁白引用区间**（`anchor_source`）之内：定格停在你说到的那一段之外，
+  等于说的和看的是两回事。
+- **奖励保持帧**（`event_phase` 或 `claim_phase` 为 `reward`）还必须写明
+  `visible_window`——候选/结论**真正可见**的源区间——并且保持帧锚点必须落在该区间**之内**。
+  典型缺陷：定格锚在窗口末端，而那时画面已经翻到地图页，于是"说选牌时并没有在选牌"。
+
+### 4.5 长静默必须逐段给依据（按**实际声段**，不是画面窗口）
+
+旁白的占位是**声段**，不是它所在的画面窗口：
+
+```
+声段 = [final_range 起点 + audio_offset_s, 同上 + 实测 audio_duration_s]
+```
+
+`audio_offset_s` 是这一段的配音在窗口内**真实的**起点偏移（来自 EDL，由制作路径写进 adopted
+时间线），不是"一般 ~0.2s"的经验假设；多段声段取**并集**后与静默 gap 同口径，旁白占比也用它。
+
+一段 60 秒的画面只配了 1 秒旁白，就只有 1 秒有声，剩下 59 秒是静默；把画面窗口当成有声区间
+会把"整段没解说"算成"整段都在讲"。声段之间取并集后，才从**实际采用的时间线**算出所有
+≥ 阈值（默认 20s）的无口播区间。**旁白占比同样只按声段计算**（`narration_audio_s ÷ 成片总长`），
+画面长度不参与。
+
+> 记账口径：时间线不带 offset 列，offset 记账在 EDL 里（`build_sample.sh` 默认量级 ~0.2s，
+> 小于台账匹配容差 ±1s）。所以声段按"从段首开始"计；如果你的渲染用了更大的 offset，
+> 静默边界会随之平移，需要以实际音轨为准。
+
+逐段填 `templates/silence-ledger.md`：
+
+| disposition | 含义 | 审计怎么判 |
+|---|---|---|
+| `keep` | 保留：画面自解释（关键动作/结算/地图） | 依据必须写实；空/占位符失败 |
+| `cut` | 本源静默已在剪辑中删掉 | 若该静默**仍被检出** → 自相矛盾，失败 |
+| `narration_added` | 已补讲，但仍留有 ≥ 阈值的静默 | 依据必须写实 |
+
+- 所有区间/时长/容差都拒绝 **NaN、inf、负数与倒序**：`anchor_source`、`visible_window`、
+  台账 `final_range`、`--tol`、`--silence-threshold`、`--min-fps` 都按这条口径校验，非法直接拒绝，
+  不用它掩盖硬失败。
+- 成片里有 ≥ 阈值的静默而台账**缺行** → 失败。用**画面窗口**算出来的台账（静默起点偏晚）
+  会直接对不上，这是有意的。
+- 台账里有**对不上的行**（成片里已无此静默）→ 按**陈旧台账**失败：静默变了就必须从当前
+  时间线重新生成，**不许沿用旧表**，也不许靠"清空缓存重跑一遍"糊过去。
+
+**旁白占比不是通过标准。** 占比高不等于内容好，解码无报错也不等于画面对。这两条由 `audit`
+原样写在报告的 `not_a_verdict_on` 里，不得被当成验收项。
+
 ---
 
 ## 5. 解说与字幕
@@ -154,6 +347,8 @@ outcome(实际结果)
 - **逐事件生成配音**，每段生成后**测实长**再据此细剪——不要先剪好再硬塞配音。
 - **字幕来自实际口播稿/音频对齐**，不是另写一份扩写文案；说完即消失，不留长驻字幕；
   字幕文字 = 实际说出的文字（同音误听按实际音频改正）。
+- **字幕与音轨都从最终采用的那一版时间线生成**，并各自留 sha256；版本绑定由 §4.1 的审计核对。
+  字幕不是"最后另配一份"，音轨也不是"用上一版稿渲染的"。
 
 ---
 
@@ -176,7 +371,28 @@ outcome(实际结果)
 
 **未知不得当通过**：没有真值可比对时填 `unknown`，**不要臆造 `0`**。
 
-检查：`scripts/check_postproduction.py sheet <file>`
+### 6.1 机器门槛（结构与语义分开，不许互相顶替）
+
+```bash
+C=skills/gameplay-postproduction/scripts/check_postproduction.py
+A=skills/gameplay-postproduction/scripts/check_timeline_audit.py
+
+python3 "$C" sheet  review-sheet.md                    # 结构
+python3 "$A" audit  timeline.tsv --preflight preflight.json --silence-ledger gaps.tsv \
+    --subtitle subs.srt --audio voice_master.wav --final-mp4 final.mp4 \
+    --report-out audit-report.json
+python3 "$C" ready  review-sheet.md --final-mp4 /abs/final.mp4 \
+    --timeline timeline.tsv --preflight preflight.json \
+    --silence-ledger gaps.tsv --subtitle subs.srt --audio voice_master.wav
+```
+
+`ready` **强制要求**后面那一整套审计输入：缺任一项就不是"已审片"。两份语义说清楚：
+
+- `sheet` 通过只说明**单子结构合法**（空白模板也会过）；
+- `audit` 通过只说明**时间线自洽**（阶段/保持帧/静默/版本），它**不看画面、不听音轨**；
+- `ready` 通过才说明"这份单子可以当作已审片交付"，仍然**不等于内容好**。
+
+检查：`scripts/check_postproduction.py sheet <file>`　语义审计：`scripts/check_timeline_audit.py audit`
 
 ---
 
@@ -185,6 +401,37 @@ outcome(实际结果)
 - **尽量局部**：按问题单里的源/成片区间只改该段，**不重做整场**。
 - 每条问题要能**唯一定位到单元**（`event_id`）与**素材**（`asset_id`）。
 - 修复后重跑受影响检查；**仍不能确认的事实如实挂起**（记 `unknown`），**不无限循环**。
+
+### 7.0 制作路径与交付路径是同一条：绕过去就是 draft
+
+制作路径在收尾时会生成 `adopted-timeline.tsv`（见 §4.1.1）与 `produce-receipt.json`，
+然后用 `ready` 用的**同一个** checker 审计它们；产出 `ready` 要用的就是这份 adopted 版本
+（`ready ... --timeline <out>/adopted-timeline.tsv --receipt <out>/produce-receipt.json [--edl edl.tsv]`）。
+
+`tools/voice/build_sample.sh` **默认就会调用**与 `ready` 同一个 checker、同一套规则的采用时间线审计：
+
+- 同时给了 `TIMELINE` / `PREFLIGHT` / `SILENCE_LEDGER` → 导出后现场审计；不过 → 退出 3 并写出
+  `DRAFT.txt`；通过 → 留下 `audit-report.json` 并清掉 DRAFT 标记；
+- 没给 → 产物**一律标 `DRAFT.txt`（不可交付）**，并在 stderr 明说"未过采用时间线审计"。
+
+也就是说：**没有经过审计的成片，不可能被误当成可交付物**。`ready` 那边同样不接收外部报告，
+缺任一媒体参数（时间线/预检/静默台账/字幕/音轨/成片）都判未就绪。
+
+### 7.1 增量重算与失效：按真实内容，不靠清空缓存，也不靠进程名
+
+- **失效依据是内容，不是时间戳也不是"重跑一遍"。** TTS 侧已经是内容寻址：缓存键覆盖
+  `text/model/voice/direction/optimize/fmt/strict_no_rewrite/端点指纹`，且**键命中还不够** ——
+  磁盘上的音频必须仍是被测过的那一份（`duration_s` 有限正数 + sha256 + 字节数都相符），
+  否则重合成。渲染侧同理：素材台账里的 `sha256`/`size_bytes` 与实际文件不符，就是
+  **stale manifest**，必须按真实输入重算（`audit` 会直接判失败）。
+- **只重算改变的那一段。** 改一句稿就只重做那一个节点，其余节点保持命中；
+  "清空整个缓存"不是增量策略，只是把风险换成重跑。测试 `C6` 锁住这条行为。
+- **完成判定只看产物，且要绑定到同一次制作。** 判"跑完了没有"要看输出本身——文件存在、
+  sha256/段数/时长与计划相符，并且 receipt 证明它们出自同一次制作——
+  **不要**用 `pgrep`/`ps` 匹配自己的进程名或命令行（那会匹配到包装脚本、别的任务，
+  甚至匹配到自己），也不要只看日志里出现了某个关键词。这类判定在失败恢复时会直接骗人。
+- **失败恢复要留现场**：半成品删除或标记，不写"成功"记录；不可测的结果（取不到时长、
+  空音频）一律算失败而不是缓存成功。
 
 ---
 
@@ -218,10 +465,16 @@ python3 "$GCB" result "$JOB" --json                         # 正文与 provenan
 # 3) 关键片段第二意见（仅必要时，只对该片段）
 python3 "$GCB" video --path /abs/path/to/clip.mp4 --model gemini-3.1-pro-high --json
 
-# 4) 产物校验
+# 4) 产物校验（结构）
 python3 "$S/scripts/check_postproduction.py" timeline timeline.tsv
 python3 "$S/scripts/check_postproduction.py" units    units.tsv
 python3 "$S/scripts/check_postproduction.py" sheet    review-sheet.md
+
+# 4b) 输入预检 + 采用时间线语义审计（确定性，不调用模型）
+python3 "$S/scripts/check_timeline_audit.py" preflight --json --out preflight.json rec-both="$SRC"
+python3 "$S/scripts/check_timeline_audit.py" audit timeline.tsv --preflight preflight.json \
+    --silence-ledger gaps.tsv --subtitle subs.srt --audio voice_master.wav \
+    --final-mp4 final.mp4 --report-out audit-report.json
 
 # 5) 精确剪点定位（不归本流程；dapi 命令面以本机 help 为准）
 dapi media probe --help
@@ -241,3 +494,12 @@ dapi media grab  --help
 
 > 本文件是**工作流规范**，不声称流程已由代码自动实施；本仓库只提供**规范 + 模板 + 确定性检查器**
 > 与三个独立小工具（录音器 / TTS 适配器 / EDL 组装）。视频理解与剪辑由你选定的外部工具完成。
+>
+> **本仓库的离线测试套件是"检查器套件"，不是完整渲染引擎。** 端到端跑满的只有一条短合成路径
+> （`tools/voice/build_sample.sh` + lavfi 生成的几秒素材）。真实录屏的剪辑/合成/导出由你选的
+> 外部工具完成；本套件保证的是"产物与时间线、预检台账、receipt 自洽"，不是"渲染结果好看"。
+>
+> **哪些是机器判的，哪些不是**：结构（`timeline`/`units`/`sheet`）、输入预检（`preflight`）、
+> 时间线语义（`audit`，见 §4.1–4.5）与就绪门槛（`ready`）都是确定性代码，可离线复现。
+> **听感、抑扬、断句是否自然，以及事实语义（选牌/伤害/胜负/身份），机器一律不裁定**，
+> 只能靠真人听看 + 回源帧；`audit` 报告的 `not_a_verdict_on` 与 `unverified` 会把这条边界写出来。

@@ -336,6 +336,25 @@ def main() -> int:
             for k in ("TTS_BASE_URL", "TTS_API_KEY", "TTS_MODEL", "TTS_VOICE"):
                 os.environ.pop(k, None)
             load_adapter(base)
+
+        # ---- C6: an incremental re-render is per node. Editing one line must re-synthesize that
+        #          node only; the untouched nodes stay cached. "Clear the cache and redo the whole
+        #          episode" is not the mechanism, and a process-name check is not completion proof.
+        RESPOND_WITH.clear()
+        RESPOND_WITH["data"] = base64.b64encode(make_wav_bytes(0.4)).decode()
+        scripts = {"n1": "line one", "n2": "line two", "n3": "line three"}
+        nodes = {k: tmp / f"{k}.wav" for k in scripts}
+        for k, path in nodes.items():
+            mod.synth(scripts[k], path)
+        reused = {k: mod.synth(scripts[k], p)["cache_hit"] for k, p in nodes.items()}
+        ck("C6 every unchanged node is reused without a network call", all(reused.values()), str(reused))
+        scripts["n2"] = "line two, edited"
+        after = {k: mod.synth(scripts[k], p)["cache_hit"] for k, p in nodes.items()}
+        ck("C6 editing one segment re-synthesizes only that node",
+           after == {"n1": True, "n2": False, "n3": True}, str(after))
+        ck("C6 the neighbour nodes keep their measured durations",
+           all(json.loads((nodes[k].with_suffix(".wav.meta.json")).read_text(encoding="utf-8"))["duration_s"] > 0
+               for k in ("n1", "n3")))
     finally:
         srv.shutdown()
         shutil.rmtree(tmp, ignore_errors=True)
