@@ -77,7 +77,7 @@ same round was closed out with these:
   something was drawn, never which characters. `not_a_verdict_on` now leads with text correctness.
 - **bash 3.2 + non-ASCII.** `$OUT，` (variable immediately followed by a CJK character) made the
   draft notice itself die with `unbound variable`; braces are now used, and a test guards the notice.
-- Tests: 213 -> **222** offline cases (5 -> 8 subtitles, 13 -> 19 assembly).
+- Tests: 213 -> **223** offline cases (5 -> 8 subtitles, 13 -> 20 assembly).
 
 
 ## Unreleased — 2026-09-24

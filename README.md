@@ -24,7 +24,7 @@ parts that need judgement stay yours, and the parts that must not be fudged are 
   at the app level, and compiles from source — no signed binary is shipped.
 - **Voice and assembly tools** (`tools/voice/`) — an optional TTS adapter, an EDL assembler that
   refuses to export a mistimed cut, and a subtitle burner for ffmpeg builds without libass.
-- **222 offline tests** that need no network, no keys and no game.
+- **223 offline tests** that need no network, no keys and no game.
 
 New here? Go to [Quick start](#quick-start-shortest-path-that-actually-works), then
 [Using the skill](#using-the-skill), then read
@@ -180,7 +180,7 @@ evidence is in this repo; "unverified" means nobody has shown it works.
 | Adopted-timeline audit (phase anchors, labelled holds, visible window, silence ledger, version binding, stale manifest) | **Verified — offline** | Same suite: 112 cases over anonymous synthetic fixtures, each defect reproduced by a committed fixture (anchors, phase declaration, audio-span silence, content binding, receipt, numeric rejection) |
 | Perceived delivery, factual semantics, "is this cut any good" | **Not judged — by design** | `audit` reports a `not_a_verdict_on` list; only a human listening/watching plus source-frame checks can settle these |
 | Subtitle paging and ASS time base | **Verified — offline** | `tests/test_subtitles.py`: 8 cases — phrase paging covers the span exactly, total-centisecond ASS carry, PlayRes = video size, escaping, CRLF/word boundaries, bad cues fail loudly, numeric args rejected |
-| EDL assembly with synthetic media (real `ffmpeg`) | **Verified — offline** | `tests/test_build_sample.py`: 19 cases, lavfi fixtures, incl. the one-shot adopted-timeline loop, A/B source mismatch, the freeze fail-closed path, libass burn + pixel check, wrong-band detection, source-audio mix and silent-source refusal |
+| EDL assembly with synthetic media (real `ffmpeg`) | **Verified — offline** | `tests/test_build_sample.py`: 20 cases, lavfi fixtures, incl. the one-shot adopted-timeline loop, A/B source mismatch, the freeze fail-closed path, libass burn + pixel check, wrong-band detection, source-audio mix and silent-source refusal |
 | TTS adapter hard guarantees (no rewrite, empty/unmeasurable audio fails, no dud cache, per-node re-render) | **Verified — offline** | `tests/test_tts_guarantees.py`: 51 cases against a loopback fake endpoint |
 | TTS adapter works with **your** provider | **Unverified — by design** | Only one wire shape is targeted; no cross-vendor claim is made |
 | macOS recorder compiles and its offline checks pass | **Verified** | `tools/gamerec/tests/regression.sh` offline group: 20 checks, incl. both no-overwrite gates |
