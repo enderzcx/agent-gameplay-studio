@@ -20,7 +20,7 @@
   不附带签名二进制。
 - **配音与组装工具**（`tools/voice/`）：可选 TTS 适配器、放不下就拒绝导出的 EDL 组装器、
   以及给没有 libass 的 ffmpeg 用的字幕烧录器。
-- **222 项离线测试**：不需要网络、不需要密钥、不需要游戏。
+- **223 项离线测试**：不需要网络、不需要密钥、不需要游戏。
 
 第一次来？先看[最短可复制 quick start](#最短可复制-quick-start)，再看
 [实际使用 skill](#实际使用-skill)，然后读[哪些真的验证过](#哪些真的验证过哪些没有)再决定信什么。
@@ -44,7 +44,7 @@ cd agent-gameplay-studio
 
 # 0) 先看能做什么，再跑全部离线检查。无网络、无密钥、不需要游戏。
 make help
-make check          # 5 套离线测试：检查器 + 时间线审计 + 字幕分页与时基 + 组装/烧字幕/原声 + TTS 硬保证（共 222 例）
+make check          # 5 套离线测试：检查器 + 时间线审计 + 字幕分页与时基 + 组装/烧字幕/原声 + TTS 硬保证（共 223 例）
 
 # 1) 检查器可以直接用在你的产物上
 C=skills/gameplay-postproduction/scripts/check_postproduction.py
@@ -161,7 +161,7 @@ python3 "$REPO/skills/gameplay-postproduction/scripts/check_postproduction.py" -
 | 采用时间线审计（阶段锚点 / 保持帧 / 可见区间 / 静默依据 / 版本绑定 / stale 台账） | **已验证 · 离线** | 同一套 112 例，每个缺陷都由一个匿名合成 fixture 复现（锚点 / 阶段声明 / 按实际声段的静默 / 内容绑定 / 制作 receipt / 数值拒绝） |
 | 听感、事实语义、"这条片子好不好" | **不判定 —— 这是刻意的** | `audit` 报告里有 `not_a_verdict_on` 列表；只有真人听看 + 回源帧能定 |
 | 字幕分页与时基 | **已验证 · 离线** | `tests/test_subtitles.py`：8 例——短语分页严丝合缝铺满时间窗、ASS 总厘秒进位、PlayRes = 视频尺寸、转义、CRLF 与西文词边界、坏条明确失败、非法数值拒绝 |
-| 合成媒体走 EDL 组装（真 `ffmpeg`） | **已验证 · 离线** | `tests/test_build_sample.py`：19 例，lavfi 合成素材（含首次一次 build 闭环、A/B 源错配、定格 fail-closed、libass 烧字幕 + 像素抽检、错带必须被拒、原声混音与无声源拒绝） |
+| 合成媒体走 EDL 组装（真 `ffmpeg`） | **已验证 · 离线** | `tests/test_build_sample.py`：20 例，lavfi 合成素材（含首次一次 build 闭环、A/B 源错配、定格 fail-closed、libass 烧字幕 + 像素抽检、错带必须被拒、原声混音与无声源拒绝） |
 | TTS 适配器硬保证（不改稿 / 空音频与测不出时长都失败 / 缓存不放废件 / 只重算改变节点） | **已验证 · 离线** | `tests/test_tts_guarantees.py`：51 例，走回环假端点 |
 | TTS 适配器能对接**你的**供应商 | **未验证 —— 这是刻意的** | 只针对一种 wire 形状，不做跨供应商声明 |
 | macOS 录音器能编译、离线检查通过 | **已验证** | `tools/gamerec/tests/regression.sh` 离线组：20 项，含两道"默认不覆盖"闸门 |

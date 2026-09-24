@@ -504,6 +504,23 @@ def test_burner_refuses_missing_labels_and_bad_subtitles(root: Path, src: Path, 
     print("ok  test_burner_refuses_missing_labels_and_bad_subtitles（缺标注/坏字幕都不放过）")
 
 
+def test_small_font_is_not_rejected_by_the_threshold(root: Path, src: Path, vdir: Path) -> None:
+    """合法的小字号不该被抽检卡掉：`--min-text-px` 是**绝对像素数**，要跟着字号走。"""
+    p, out = build(root, src, vdir, f"1\t0.0\t4.0\tshort.wav\t0.0\t0\t{LONG_NARRATION}\n",
+                   "smallfont", {"BURN_SUBS": "1", "SUB_SIZE": "16", "SUB_MARGIN_LR": "24"})
+    assert p.returncode == 0, f"小字号烧录失败:\n{p.stderr[-400:]}"
+    q = run([sys.executable, str(PIXEL), "--video", str(out / "final.mp4"),
+             "--baseline", str(out / "final-nosub.mp4"), "--subs", str(out / "subs.srt"),
+             "--band", "170:240", "--margin-x", "6", "--min-text-px", "12"])
+    assert q.returncode == 0, f"合法小字号被误判:\n{q.stdout}\n{q.stderr}"
+    # 同一份媒体，用默认的大阈值就不该通过 —— 阈值是相对字号的选择，不是"越严越好"
+    q2 = run([sys.executable, str(PIXEL), "--video", str(out / "final.mp4"),
+              "--baseline", str(out / "final-nosub.mp4"), "--subs", str(out / "subs.srt"),
+              "--band", "170:240", "--margin-x", "6", "--min-text-px", "4000"])
+    assert q2.returncode == 1, "把阈值抬到 4000 却仍然通过，说明阈值根本没生效"
+    print("ok  test_small_font_is_not_rejected_by_the_threshold（小字号按 12px 阈值通过；阈值确实生效）")
+
+
 def test_pixel_checker_refuses_unsafe_args_and_catches_missing_subs(root: Path, src: Path,
                                                                    vdir: Path) -> None:
     p, out = build(root, src, vdir, "1\t0.0\t2.0\tshort.wav\t0.1\t0\t抽检参数\n", "pixelargs",
@@ -587,10 +604,11 @@ def main() -> int:
                    test_burn_survives_a_hostile_output_path,
                    test_burner_refuses_missing_labels_and_bad_subtitles,
                    test_pixel_checker_refuses_unsafe_args_and_catches_missing_subs,
+                   test_small_font_is_not_rejected_by_the_threshold,
                    test_make_cut_sets_delivery_defaults,
                    test_find_tools_points_at_the_real_tools_dir):
             fn(root, src, vdir)
-        print("\n全部通过（19 项）")
+        print("\n全部通过（20 项）")
         return 0
     finally:
         shutil.rmtree(root, ignore_errors=True)
