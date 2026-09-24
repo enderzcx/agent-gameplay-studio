@@ -51,12 +51,16 @@ NEGATIVE_FIXTURES = [
     ("phase-mismatch", "阶段错位"),
     ("claim-cross-phase-undeclared", "必须显式写成"),
     ("claim-mode-invalid", "claim_mode"),
+    ("offset-missing", "audio_offset_s"),
+    ("offset-negative", "audio_offset_s"),
+    ("offset-overflows-window", "放不进"),
     ("anchor-event-mismatch", "换了事件不能默默过"),
     ("anchor-outside-shot", "不在这一行真实画面的源区间"),
     ("cross-turn-uncovered", "没有覆盖镜头跨度"),
     ("anchor-nonfinite", "anchor_source"),
     ("anchor-negative", "anchor_source"),
     ("hold-unlabeled", "hold_mark 为空"),
+    ("hold-not-burned-in", "hold_burned_in"),
     ("hold-outside-window", "可见区间"),
     ("overlong-narration", "放不进"),
     ("version-mixed", "subtitle_source"),
@@ -159,7 +163,9 @@ def make_media(root: Path) -> dict:
             "src_long": src_long, "not_media": not_media}
 
 
-CUE_TIMES = [(0.5, 3.5), (6.5, 9.0), (34.5, 38.0), (62.2, 64.0)]
+# the one-cue-per-row contract: every cue must MATCH its row's real audio span
+# [final_start + audio_offset_s, + measured audio_duration_s]
+CUE_TIMES = [(0.5, 6.0), (6.0, 10.0), (34.5, 40.0), (62.25, 65.75)]
 CUE_TEXTS = ["opening line", "mid-battle line", "reward line", "closing line covering both turns"]
 
 
@@ -195,14 +201,25 @@ def materialize(name: str, root: Path, srt: Path, audio: Path, final: Path) -> P
 
 
 def write_receipt(root: Path, timeline: Path, srt: Path, audio: Path, final: Path, pre: Path,
-                  name: str = "produce-receipt.json", **overrides) -> Path:
-    """制作 receipt：由制作路径写出，把 timeline 与三份产物绑在同一次制作上。"""
+                  name: str = "produce-receipt.json", src_video: Path = None,
+                  edl: Path = None, **overrides) -> Path:
+    """制作 receipt：由制作路径写出，把 timeline 与三份产物绑在同一次制作上。
+
+    `source_video` / `edl` 记录的是**实际读过的东西**，不是把 preflight 台账抄一份。
+    """
     assets = json.loads(pre.read_text(encoding="utf-8")).get("assets") or {}
+    src_video = src_video or (assets.get("rec-synth") or {}).get("source_path")
+    src_video = Path(src_video)
+    if not src_video.is_absolute():          # 台账里的相对路径按 manifest 目录解析
+        src_video = (pre.parent / src_video).resolve()
     rec = {
         "schema": "gameplay-postproduction/produce-receipt/1",
         "produced_by": "tests/test_timeline_audit.py (synthetic harness)",
         "produced_at": "2026-09-24T00:00:00Z",
         "timeline": {"path": str(timeline), "sha256": sha(timeline)},
+        "source_video": {"path": str(src_video), "sha256": sha(src_video)},
+        "edl": {"path": str(edl or (root / "synthetic.edl.tsv")),
+                "sha256": sha(edl) if edl and Path(edl).is_file() else "0" * 64},
         "subtitle": {"path": str(srt), "sha256": sha(srt)},
         "audio": {"path": str(audio), "sha256": sha(audio)},
         "final": {"path": str(final), "sha256": sha(final)},
@@ -319,12 +336,15 @@ def test_audit_positive(root: Path, media: dict, pre: Path, srt: Path) -> None:
        rc == 0 and payload.get("ok") is True, f"rc={rc} {payload.get('errors')} {stderr[-200:]}")
     rep = payload.get("report") or {}
     sil = rep.get("silence") or {}
-    ck("audit: silence is measured on the REAL audio spans, so the first gap starts at 11.5 s",
-       [g["final_range"] for g in sil.get("gaps") or []] == [[11.5, 34.0], [39.5, 62.0]],
+    ck("audit: silence uses the REAL audio spans (offset included) merged as a union",
+       [g["final_range"] for g in sil.get("gaps") or []] == [[10.0, 34.5], [40.0, 62.25]],
        str(sil.get("gaps")))
-    ck("audit: narration ratio uses the measured audio seconds (20.0 s / 66.0 s), not picture length",
-       sil.get("narration_audio_s") == 20.0
-       and abs((sil.get("narration_ratio") or 0) - 20 / 66) < 1e-4, str(sil))
+    ck("audit: the spans are reported as the merged union, matching the gap arithmetic",
+       sil.get("audio_spans") == [[0.5, 10.0], [34.5, 40.0], [62.25, 65.75]],
+       str(sil.get("audio_spans")))
+    ck("audit: narration ratio uses the merged audio seconds (18.5 s / 66.0 s), not picture length",
+       sil.get("narration_audio_s") == 18.5
+       and abs((sil.get("narration_ratio") or 0) - 18.5 / 66) < 1e-4, str(sil))
     ck("audit: the report states what it refuses to judge (narration ratio, decode, taste)",
        "旁白占比" in "".join(rep.get("not_a_verdict_on") or []), str(rep.get("not_a_verdict_on")))
     ck("audit: the report states that human-declared anchors/annotations are not machine proof",
@@ -367,8 +387,9 @@ def test_silence_is_measured_on_audio_not_picture(root: Path, media: dict, pre: 
     srt = write_srt(root / "subs-solo.srt", [(0.0, 1.0, "one second line")])
     # a 66 s SHOT (so the timeline arithmetic stays self-consistent) carrying only a 1 s line
     row = ["rec-synth", "ev-solo", "0.0-66.0", "0.0-66.0", "0.0-66.0", "1x", "one second line",
-           "1.0", "subs-synth", "battle", "battle", "live", "rec-synth", "ev-solo", "0.0-1.0",
-           "src rec-synth@0.5s opening", "-", "-", "@SUB_SHA@", "@AUD_SHA@", "@FINAL_SHA@"]
+           "1.0", "subs-synth", "battle", "battle", "live", "0.0", "rec-synth", "ev-solo",
+           "0.0-1.0", "src rec-synth@0.5s opening", "-", "-", "no",
+           "@SUB_SHA@", "@AUD_SHA@", "@FINAL_SHA@"]
     work = root / "shortsilence"
     work.mkdir(parents=True, exist_ok=True)
     tl = work / "timeline.tsv"
@@ -402,9 +423,32 @@ def test_silence_is_measured_on_audio_not_picture(root: Path, media: dict, pre: 
     expect("audit: the same cut passes once that silence is justified per stretch",
            0, AUDIT, local_args(ledger))
 
-    expect("audit: a ledger computed from picture windows instead of audio spans is rejected",
+    expect("audit: a ledger computed from picture windows instead of real spans is rejected",
            1, AUDIT, bound("timeline.audit.ok.tsv", root, srt, media["voice"], media["final"], pre,
                            ledger=FIX / "silence.ledger.picture-window.tsv"), substr="静默")
+
+
+def test_merged_union_is_the_ratio_basis() -> None:
+    """narration_audio/ratio must use the merged union, not sum(per-segment spans)."""
+    import check_timeline_audit as mod
+
+    overlapping = [{"final": (0.0, 10.0), "audio_offset_s": 0.0, "audio_duration_s": 8.0},
+                   {"final": (4.0, 14.0), "audio_offset_s": 0.0, "audio_duration_s": 8.0}]
+    raw = mod.narration_spans(overlapping)
+    union = mod.merged_audio_spans(overlapping, 0.05)
+    ck("library: overlapping narration spans merge into one union span", union == [(0.0, 12.0)],
+       f"raw={raw} union={union}")
+    ck("library: the union is smaller than sum(spans) when spans overlap",
+       sum(e - s for s, e in union) < sum(e - s for s, e in raw), f"{union} vs {raw}")
+
+    touching = [{"final": (0.0, 8.0), "audio_offset_s": 0.0, "audio_duration_s": 8.0},
+                {"final": (8.0, 18.0), "audio_offset_s": 0.0, "audio_duration_s": 8.0}]
+    ck("library: touching spans merge too (same tolerance as the gap arithmetic)",
+       mod.merged_audio_spans(touching, 0.05) == [(0.0, 16.0)],
+       str(mod.merged_audio_spans(touching, 0.05)))
+    offset_row = [{"final": (8.0, 18.0), "audio_offset_s": 0.1, "audio_duration_s": 7.9}]
+    ck("library: the span honours a non-zero offset",
+       mod.narration_spans(offset_row) == [(8.1, 16.0)], str(mod.narration_spans(offset_row)))
 
 
 def test_audit_content_binding(root: Path, media: dict, pre: Path) -> None:
@@ -429,7 +473,15 @@ def test_audit_content_binding(root: Path, media: dict, pre: Path) -> None:
     shifted = write_srt(root / "subs-shifted.srt", shifted_cues)
     expect("audit: a same-count subtitle whose timings moved out of its audio span is rejected",
            1, AUDIT, bound("timeline.audit.ok.tsv", root / "shifted", shifted, media["voice"],
-                           media["final"], pre), substr="字幕时点")
+                           media["final"], pre), substr="字幕起止没有贴合")
+
+    # the exact hole the reviewer described: the whole sentence squeezed into the last 0.1 s
+    squeezed = write_srt(root / "subs-squeezed.srt",
+                         [(s, e, t) if t != "reward line" else (39.9, 40.0, t)
+                          for s, e, t in good_cues()])
+    expect("audit: a whole line squeezed into the last 0.1 s of its span is rejected", 1, AUDIT,
+           bound("timeline.audit.ok.tsv", root / "squeezed", squeezed, media["voice"],
+                 media["final"], pre), substr="字幕起止没有贴合")
 
     other_voice = root / "voice-replaced.wav"
     sh(["ffmpeg", "-nostdin", "-v", "error", "-y", "-f", "lavfi",
@@ -503,6 +555,42 @@ def test_receipt_binding(root: Path, media: dict, pre: Path) -> None:
            "is rejected", 1, AUDIT,
            audit_args(tl, pre, FIX / "silence.ledger.ok.tsv", srt, media["voice"],
                       media["final"], bad_src), substr="源对不上")
+
+    # source_video must be the source the timeline actually used (preflight=A, SRC_VIDEO=B)
+    other_src = root / "src-other.mp4"
+    sh(["ffmpeg", "-nostdin", "-v", "error", "-y", "-f", "lavfi",
+        "-i", "testsrc=size=320x240:rate=30", "-t", "20", "-vf", "hflip",
+        "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", str(other_src)])
+    swapped = write_receipt(root, tl, srt, media["voice"], media["final"], pre,
+                            name="receipt-other-source.json", src_video=other_src)
+    expect("audit: a receipt naming a DIFFERENT source_video than the timeline's asset is rejected",
+           1, AUDIT, audit_args(tl, pre, FIX / "silence.ledger.ok.tsv", srt, media["voice"],
+                                media["final"], swapped), substr="source_video")
+
+    no_src = write_receipt(root, tl, srt, media["voice"], media["final"], pre,
+                           name="receipt-no-source.json")
+    body = json.loads(no_src.read_text(encoding="utf-8"))
+    body.pop("source_video")
+    no_src.write_text(json.dumps(body, ensure_ascii=False), encoding="utf-8")
+    expect("audit: a receipt without source_video cannot be certified", 1, AUDIT,
+           audit_args(tl, pre, FIX / "silence.ledger.ok.tsv", srt, media["voice"],
+                      media["final"], no_src), substr="source_video")
+
+    # --edl, when given, must match the receipt's edl digest
+    edl = root / "real.edl.tsv"
+    edl.write_text("seg\tsrc_start\tsrc_end\taudio_file\toffset\tfreeze\tsubtitle_text\n"
+                   "1\t0.0\t2.0\ta.wav\t0.1\t0\tline\n", encoding="utf-8")
+    rec_edl = write_receipt(root, tl, srt, media["voice"], media["final"], pre,
+                            name="receipt-edl.json", edl=edl)
+    expect("audit: --edl matching the receipt's EDL digest passes",
+           0, AUDIT, audit_args(tl, pre, FIX / "silence.ledger.ok.tsv", srt, media["voice"],
+                                media["final"], rec_edl) + ("--edl", str(edl)))
+    other_edl = root / "other.edl.tsv"
+    other_edl.write_text("seg\tsrc_start\tsrc_end\taudio_file\toffset\tfreeze\tsubtitle_text\n"
+                         "1\t0.0\t2.0\ta.wav\t0.2\t0\tline\n", encoding="utf-8")
+    expect("audit: --edl that is not the receipt's EDL is rejected", 1, AUDIT,
+           audit_args(tl, pre, FIX / "silence.ledger.ok.tsv", srt, media["voice"],
+                      media["final"], rec_edl) + ("--edl", str(other_edl)), substr="edl")
 
 
 def test_preflight_relative_paths_survive_a_cwd_change(root: Path, media: dict) -> None:
@@ -594,6 +682,7 @@ def main() -> int:
         test_probe_helpers_fail_closed(root, media)
         test_audit_positive(root, media, pre, srt)
         test_audit_semantic_defects(root, media, pre, srt)
+        test_merged_union_is_the_ratio_basis()
         test_silence_is_measured_on_audio_not_picture(root, media, pre)
         test_audit_content_binding(root, media, pre)
         test_receipt_binding(root, media, pre)

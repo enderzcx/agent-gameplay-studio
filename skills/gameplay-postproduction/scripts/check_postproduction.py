@@ -98,8 +98,9 @@ READY_SEMANTICS = ("readiness gate only: 必查项已明确判定通过且有证
 
 # 采用时间线在基础列之外还必须带的审计列。这里只声明 schema；**语义判定只有一个 owner**：
 # check_timeline_audit.py（它 import 本模块的读取/区间工具，方向单一，不构成环）。
-AUDIT_COLUMNS = ["event_phase", "claim_phase", "claim_mode", "anchor_asset", "anchor_event",
-                 "anchor_source", "evidence", "hold_mark", "visible_window",
+AUDIT_COLUMNS = ["event_phase", "claim_phase", "claim_mode", "audio_offset_s",
+                 "anchor_asset", "anchor_event", "anchor_source", "evidence", "hold_mark",
+                 "visible_window", "hold_burned_in",
                  "subtitle_sha256", "audio_sha256", "final_sha256"]
 
 
@@ -376,7 +377,7 @@ def probe_media(path: Path) -> dict:
 
 def run_timeline_audit(rep: Report, timeline: Path, preflight: Path, silence_ledger: Path,
                        subtitle: Path, audio: Path, final_mp4: Path, receipt: Path,
-                       silence_threshold: float, tol: float) -> None:
+                       silence_threshold: float, tol: float, edl: Path | None = None) -> None:
     """把采用时间线的语义审计接进 ready 门槛。
 
     单独跑 `check_timeline_audit.py audit` 也能得到同样的判定；这里只是**让它不可跳过**。
@@ -395,7 +396,7 @@ def run_timeline_audit(rep: Report, timeline: Path, preflight: Path, silence_led
         return
     try:
         payload = build_audit_payload(timeline, preflight, silence_ledger, subtitle, audio,
-                                      final_mp4, receipt, silence_threshold, tol)
+                                      final_mp4, receipt, silence_threshold, tol, edl)
     except (SystemExit, OSError, ValueError) as exc:
         rep.error(f"时间线审计无法执行：{exc} -> 未就绪")
         return
@@ -419,7 +420,7 @@ def check_ready(path: Path, final_mp4: Path | None, tol_override: float | None,
                 timeline: Path | None = None, preflight: Path | None = None,
                 silence_ledger: Path | None = None, subtitle: Path | None = None,
                 audio: Path | None = None, receipt: Path | None = None,
-                silence_threshold: float = 20.0) -> Report:
+                silence_threshold: float = 20.0, edl: Path | None = None) -> Report:
     rep = check_sheet(path)                      # 复用结构检查
     text = path.read_text(encoding="utf-8")
 
@@ -591,7 +592,7 @@ def check_ready(path: Path, final_mp4: Path | None, tol_override: float | None,
     # 缺审计输入的情况**已在前面报过错**，这里只决定跑不跑；不接受外部审计报告替代现场重跑。
     if not missing_audit:
         run_timeline_audit(rep, timeline, preflight, silence_ledger, subtitle, audio,
-                           probe_target, receipt, silence_threshold, DEFAULT_AUDIT_TOL)
+                           probe_target, receipt, silence_threshold, DEFAULT_AUDIT_TOL, edl)
     return rep
 
 
@@ -621,6 +622,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--audio", default=None, help="ready 模式：实际采用的旁白音轨（必填）")
     ap.add_argument("--receipt", default=None,
                     help="ready 模式：制作 receipt（build_sample.sh 写出；必填，避免用旧媒体新造声明）")
+    ap.add_argument("--edl", default=None,
+                    help="ready 模式：可选，制作用的 EDL；给了就核对 receipt 的 edl 摘要")
     ap.add_argument("--silence-threshold", type=float, default=20.0,
                     help="ready 模式：多长的无口播算“需要依据”（默认 20s，必须有限且在合理区间）")
     ap.add_argument("--tol", type=float, default=None,
@@ -662,7 +665,7 @@ def main(argv: list[str] | None = None) -> int:
                               silence_ledger=expand(args.silence_ledger),
                               subtitle=expand(args.subtitle), audio=expand(args.audio),
                               receipt=expand(args.receipt),
-                              silence_threshold=args.silence_threshold)
+                              silence_threshold=args.silence_threshold, edl=expand(args.edl))
             semantics = READY_SEMANTICS
         else:
             fn, semantics = MODES[args.mode]

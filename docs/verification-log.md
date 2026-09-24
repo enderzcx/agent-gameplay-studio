@@ -14,7 +14,7 @@ only** and talks to it over loopback. No packet leaves the machine and no remote
 
 ## 1. Offline test suite at 0.1.0 — 74 cases
 
-> Historical record for the published 0.1.0 revision. The suite is now **184** cases; see §9.
+> Historical record for the published 0.1.0 revision. The suite is now **204** cases; see §9.
 
 ```
 $ make check
@@ -311,7 +311,7 @@ untracked files, no ignored files. Verified before running: 41 files present, **
 | Entry point (exactly as the README documents it) | Snapshot A | Snapshot B |
 |---|---|---|
 | `make help` | exit 0 | exit 0 |
-| `make check` (24 + 30 + 4 + 51 cases) | all pass, exit 0 | `offline tests: OK`, exit 0 |
+| `make check` (32 + 112 + 9 + 51 cases) | all pass, exit 0 | `offline tests: OK`, exit 0 |
 | `make check-examples` | exit 0 | exit 0 |
 | `make recorder-offline` (compiles the Swift recorder from scratch) | builds, **20 passed / 0 failed / 7 skipped**, exit 0 | same |
 | `tests/run_offline_tests.sh` | `离线测试全部通过`, exit 0 | same |
@@ -328,15 +328,15 @@ success.
 
 ## 9. Workflow hardening (2026-09-24) — what was actually run
 
-The suite grew from 74 to **184 offline cases**; the numbers below are the raw tail of each run.
+The suite grew from 74 to **204 offline cases**; the numbers below are the raw tail of each run.
 
 ```
 $ python3 tests/test_check_postproduction.py
   ... 32 passed, 0 failed
 $ python3 tests/test_timeline_audit.py
-  ... 94 passed, 0 failed
+  ... 112 passed, 0 failed
 $ python3 tests/test_build_sample.py
-  全部通过（7 项）
+  全部通过（9 项）
 $ python3 tests/test_tts_guarantees.py
   ... 51 passed, 0 failed
 ```
@@ -372,6 +372,17 @@ it; the global phase order was treated as a timeline; and four matching digests 
 artifacts came from one production. Each has a regression case, including a receipt bound to a
 different timeline, a 1 s line on a 66 s shot (65 s of silence, ratio 1/66), an `--audio` file with
 no audio stream, and a 5 s sheet+MP4 paired with a valid 66 s timeline/audio.
+
+**Round 3 (production path).** The recipient of round 3's review was the authoring path: the
+first build could not know the output digests, so the old flow implied a second render; the receipt
+copied the preflight ledger instead of recording what was actually read; silence still summed
+per-segment spans rather than the merged union; a one-cue subtitle only had to sit inside its span;
+and `hold_mark` was never actually applied to the picture. Each is fixed and covered:
+`test_first_build_closes_the_loop_in_one_invocation` (clean dir, placeholders in the recipe, one
+invocation, adopted timeline with real digests), `A/B source mismatch` and `recipe/EDL source-range
+and offset mismatches` failing before rendering, the squeezed-subtitle case failing on the default
+path, and the freeze case either annotated for real (when `drawtext` exists) or explicitly
+fail-closed with `DRAFT.txt` (this machine has no `drawtext`, and the suite asserts that path).
 
 **The authoring path is covered too.** `test_build_sample.py` builds a real cut through
 `build_sample.sh`: without the audit inputs the output is stamped `DRAFT.txt` and the script says so

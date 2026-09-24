@@ -14,7 +14,9 @@
 **门槛输入（缺任一项，`ready` 直接判未就绪——它们不是可选项）**：
 
 ```
-统一时间线 timeline.tsv          ：   （必须带 anchor_asset/anchor_event/anchor_source 与三份内容摘要）
+统一时间线 timeline.tsv          ：   （用制作路径写出的 **adopted-timeline.tsv**：带锚点列、真实 offset
+                                        与三份实际内容摘要；输入 recipe 允许占位，adopted 不允许）
+制作用 EDL edl.tsv               ：   （`--edl`：核对 receipt 是否由这份 EDL 产出）
 素材预检   preflight.json         ：   （check_timeline_audit.py preflight --out 生成）
 静默台账   gaps.tsv               ：   （每段 ≥ 阈值的无口播逐段给 keep/cut/narration_added + 依据）
 实际字幕   subs.srt               ：   （内容 hash 与逐条文本/时点都要与这一版时间线一致）

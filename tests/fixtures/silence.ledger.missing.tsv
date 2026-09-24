@@ -1,4 +1,4 @@
 # SYNTHETIC FIXTURE - fabricated data. Silence ledger for timeline.audit.ok.tsv.
-# Ranges are measured on the ACTUAL narration audio spans, not on the picture windows.
+# Ranges come from the ACTUAL narration spans (real offset included), merged as a union.
 gap_id	final_range	disposition	reason
-g-001	11.500-34.000	keep	picture carries continuous battle animation and the settlement screen; no line needed
+g-001	10.000-34.500	keep	picture carries continuous battle animation and the settlement screen; no line needed

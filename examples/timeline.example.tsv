@@ -8,6 +8,9 @@
 #   anchor_asset / anchor_event / anchor_source are cross-checked against THIS row's real shot
 #   span: a line may not be anchored to another event, and its referenced source interval must
 #   lie inside the shot (a cross-turn shot, event_id `a+b`, must have the line cover the span)
+#   silence and the one-cue-per-row subtitle both use the REAL span:
+#     [final_range start + audio_offset_s, + measured audio_duration_s], and the cue
+#     must MATCH it; hold_burned_in=yes attests the hold mark reached the picture
 #   any cross-phase line must declare claim_mode=retrospective, and one event may not
 #     claim a phase the picture has not reached yet
 #   freeze>0 needs hold_mark with the held source timecode; a reward hold also needs
@@ -17,7 +20,7 @@
 #     (same segment count but re-worded, re-timed or replaced output still fails)
 #   the 64-zero digests below are placeholders for readability: a real run must carry the real
 #     content digests, otherwise the audit rejects the binding.
-asset_id	event_id	source_range	clip_range	final_range	speed/freeze	narration_text	audio_duration_s	subtitle_source	event_phase	claim_phase	claim_mode	anchor_asset	anchor_event	anchor_source	evidence	hold_mark	visible_window	subtitle_sha256	audio_sha256	final_sha256
-rec-example-01	ev-001	470.0-478.5	0.0-8.5	12.3-20.8	1x	"opening line, sample only"	8.1	tts-run-example	battle	battle	live	rec-example-01	ev-001	471.0-478.0	src rec-example-01@471.0s battle screen	-	-	0000000000000000000000000000000000000000000000000000000000000000	0000000000000000000000000000000000000000000000000000000000000000	0000000000000000000000000000000000000000000000000000000000000000
-rec-example-01	ev-002	478.5-496.0	8.5-26.0	20.8-41.3	1x + 定格3s	"card pick, sample only"	14.2	tts-run-example	reward	reward	live	rec-example-01	ev-002	480.0-494.0	src rec-example-01@490.0s three reward cards visible	复盘定格 · 源 rec-example-01@490.0s（候选保持）	488.5-492.0	0000000000000000000000000000000000000000000000000000000000000000	0000000000000000000000000000000000000000000000000000000000000000	0000000000000000000000000000000000000000000000000000000000000000
-rec-example-01	ev-003	496.0-506.0	26.0-36.0	62.3-67.3	2x	"sped-up traversal, sample only"	4.6	tts-run-example	map	map	live	rec-example-01	ev-003	498.0-505.0	src rec-example-01@500.0s map screen	-	-	0000000000000000000000000000000000000000000000000000000000000000	0000000000000000000000000000000000000000000000000000000000000000	0000000000000000000000000000000000000000000000000000000000000000
+asset_id	event_id	source_range	clip_range	final_range	speed/freeze	narration_text	audio_duration_s	subtitle_source	event_phase	claim_phase	claim_mode	audio_offset_s	anchor_asset	anchor_event	anchor_source	evidence	hold_mark	visible_window	hold_burned_in	subtitle_sha256	audio_sha256	final_sha256
+rec-example-01	ev-001	470.0-478.5	0.0-8.5	12.3-20.8	1x	"opening line, sample only"	8.1	tts-run-example	battle	battle	live	0.5	rec-example-01	ev-001	471.0-478.0	src rec-example-01@471.0s battle screen	-	-	0000000000000000000000000000000000000000000000000000000000000000	no	0000000000000000000000000000000000000000000000000000000000000000	0000000000000000000000000000000000000000000000000000000000000000
+rec-example-01	ev-002	478.5-496.0	8.5-26.0	20.8-41.3	1x + 定格3s	"card pick, sample only"	14.2	tts-run-example	reward	reward	live	0.5	rec-example-01	ev-002	480.0-494.0	src rec-example-01@490.0s three reward cards visible	复盘定格 · 源 rec-example-01@490.0s（候选保持）	488.5-492.0	0000000000000000000000000000000000000000000000000000000000000000	yes	0000000000000000000000000000000000000000000000000000000000000000	0000000000000000000000000000000000000000000000000000000000000000
+rec-example-01	ev-003	496.0-506.0	26.0-36.0	62.3-67.3	2x	"sped-up traversal, sample only"	4.6	tts-run-example	map	map	live	0.5	rec-example-01	ev-003	498.0-505.0	src rec-example-01@500.0s map screen	-	-	0000000000000000000000000000000000000000000000000000000000000000	no	0000000000000000000000000000000000000000000000000000000000000000	0000000000000000000000000000000000000000000000000000000000000000

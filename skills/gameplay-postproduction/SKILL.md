@@ -129,13 +129,16 @@ python3 "$REPO/skills/$SKILL/scripts/check_postproduction.py" --help
    终片审查的对象是**实际导出的 MP4**；**未知不得当通过**（无真值填 `unknown`，不填 `0`）。
    → `templates/review-sheet.md`
 5. **门槛输入（`ready` 强制要求，缺一即未就绪，且不接受外部报告替代现场重跑）**：
+   `adopted-timeline.tsv`（**从真实 EDL + 实测结果生成**，不是叫调用方盲改输入 recipe；首次制作
+   一次 build 就能拿到它，不需要为了拿摘要重跑一遍）、
    `preflight.json`（源台账，`preflight --out` 生成）、`gaps.tsv`（每段 ≥ 阈值的无口播逐段给
    `keep|cut|narration_added` + 依据，**按实际声段算** → `templates/silence-ledger.md`）、
    `produce-receipt.json`（**制作路径在产出那一刻写出**，把时间线与字幕/音轨/成片绑在同一次制作上）、
    以及 `audit-report.json`（锚点核对 / 阶段 / 保持帧 / 静默 / **内容级版本绑定 + receipt** /
    `unverified` / `human_annotations_not_machine_verified` / `not_a_verdict_on`）。
-   时间线必须自带字幕/音轨/成片三份**内容摘要**；只数段数、只 hash 输入原片、或拿旧媒体再手写
-   一份声明，都挡不住旧产物。
+   时间线必须自带字幕/音轨/成片三份**内容摘要**（输入 recipe 可占位，adopted 不允许）；
+   receipt 还要记录**实际读过的源视频与 EDL**；`--edl` 会核对 receipt 是否由这份 EDL 产出。
+   只数段数、只 hash 输入原片、或拿旧媒体再手写一份声明，都挡不住旧产物。
 
 **证据**：每条事实性结论必须能指到**源帧时间码 / ffprobe 输出 / 文件**。
 **停止条件**：修复**尽量局部**；仍无法确认的事实**如实挂起**（写进问题单的 `unknown`），**不无限循环**。
@@ -182,11 +185,13 @@ python3 "$C" ready "review-sheet.md" --final-mp4 "/abs/path/final.mp4" \
 |---|---|---|
 | `timeline` / `units` / `sheet` | TSV（TAB 或 `\|`）/ TSV / Markdown | **仅"结构合法"**：字段齐全、算术自洽、章节完整。**空白模板也会通过** —— 这不代表审片通过，也不代表成片可用。 |
 | `preflight` | 源素材路径（真 ffprobe/ffmpeg） | **"输入状态已明确"**：音轨存在性（`present`/`silent`/`absent`）、采集密度（`normal`/`sparse`）、摘要与时长全部被独立探测；探测不出来就是 `undetermined` 并**非 0 退出**。 |
-| `audit` | timeline TSV + preflight 台账 + 静默台账 + 字幕 + 音轨 + 成片 + 制作 receipt | **"采用时间线自洽"**：旁白声明的 (素材, 回合, 源区间) 与本行真实画面源区间交叉核对通过（跨回合句必须覆盖镜头跨度）、跨阶段句显式声明且同一事件不提前讲结果、`freeze>0` 都有带源时间码的标注（奖励保持帧还须落在候选可见区间内）、旁白放得进窗口、**按实际声段**算的每段长静默有依据、字幕/音轨/成片按**内容 hash + 字幕文本与时点**绑定且 receipt 证明同属一次制作、源台账不 stale。 |
+| `audit` | timeline TSV + preflight 台账 + 静默台账 + 字幕 + 音轨 + 成片 + 制作 receipt（`--edl` 可选） | **"采用时间线自洽"**：旁白声明的 (素材, 回合, 源区间) 与本行真实画面源区间交叉核对通过（跨回合句必须覆盖镜头跨度）、跨阶段句显式声明且同一事件不提前讲结果、`freeze>0` 都有带源时间码的标注（奖励保持帧还须落在候选可见区间内）、旁白放得进窗口、**按实际声段**算的每段长静默有依据、字幕/音轨/成片按**内容 hash + 字幕文本与时点**绑定且 receipt 证明同属一次制作、源台账不 stale。 |
 | `ready` | Markdown + `--final-mp4` + 上面那一整套审计输入 | **"可交付就绪"**：A1–A5/E1–E9/G1–G3 全部**明确判定为「是」且有证据**（仅 G2 允许 N/A）、无未填占位符、无未解决 issue、H 段**明确且唯一地写「通过」**、末段媒体的**元数据/轨道**经独立 `ffprobe` 探测并与声明时长在容差内一致，**且采用时间线通过语义审计**。 |
 
 **本 skill 的离线测试是"检查器套件"，不是完整渲染引擎**：端到端跑满的只有 `tools/voice/build_sample.sh`
-那条短合成路径（几秒 lavfi 素材）。真实录屏的剪辑/合成/导出仍由你选的外部工具完成。
+那条短合成路径（几秒 lavfi 素材）。该组装器只支持**单源视频、1x 速度、EDL 的 src/offset/freeze/字幕**，
+以及能把标注真正烧进画面的 freeze（需要 ffmpeg `drawtext`）；超出的形态它会**明确失败并保持 draft**，
+不会假装支持。真实录屏的剪辑/合成/导出仍由你选的外部工具完成。
 
 **`ready` / `audit` 不做什么**：它们**不观看画面、不听音轨、不检查帧内容、不验证音画同步**，
 也不做画面质量与听感判定 —— 不替代人工审片。审计报告里有一项 `not_a_verdict_on` 明确写着：

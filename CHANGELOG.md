@@ -2,6 +2,32 @@
 
 ## Unreleased — 2026-09-24
 
+**Production-path closure (review round 3).**
+
+The default authoring path could still pass falsely or force a second render:
+
+- **First build closes the loop.** The final digests cannot exist before they are produced, so the
+  input recipe may now carry placeholders. `tools/voice/produce_timeline.py` cross-checks the recipe
+  against the real EDL (shot order, source ranges, 1x speed, freeze, narration text, measured audio
+  length, offset) and the real `SRC_VIDEO` digest **before rendering**, then writes
+  `adopted-timeline.tsv` (real digests, real `audio_offset_s`, real `hold_burned_in`) and
+  `produce-receipt.json` after rendering. `ready` consumes the adopted file — no
+  "build once for the digests, fill them in, build again" cycle.
+- **The receipt records what was actually read.** `source_video` and `edl` are no longer copied
+  from the preflight ledger; the audit requires `source_video.sha256` to belong to the assets the
+  timeline uses, and `--edl` (optional; used by the default path) verifies the EDL digest. A
+  preflight for A with `SRC_VIDEO=B` (same length, different picture) fails before rendering.
+- **Silence and the ratio use the merged union of the real audio spans**, offset included, instead
+  of `sum(spans)`.
+- **The one-cue-per-row subtitle must MATCH its row's audio span** (tolerance `--tol`); merely
+  sitting inside it is not enough, so a whole sentence squeezed into the last 0.1 s now fails.
+  `audio_offset_s` is recorded with the real EDL value instead of a "~0.2 s" assumption.
+- **A hold mark must reach the picture.** `hold_burned_in: yes` is required for any freeze; the
+  assembler burns the annotation with `drawtext` and only freezes the frame it can actually freeze
+  (the shot's last frame), otherwise it fails closed and keeps `DRAFT.txt`. Form outside this
+  assembler's support (variable speed, multiple sources, complex transitions) fails explicitly.
+- Tests: 184 -> **204** offline cases (32 checker + 112 audit + 9 EDL assembly + 51 TTS).
+
 **Workflow hardening: narration anchors, holds, silence justification and version binding.**
 
 A real re-edit of one recording exposed defects the workflow could not see, and the old reports mixed

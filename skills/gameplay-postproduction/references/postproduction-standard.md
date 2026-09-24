@@ -185,6 +185,8 @@ outcome(实际结果)
 不允许"字幕另算一套时间"或"音轨按旧版稿生成"。审计会核对：
 
 - 全片只有一个 `subtitle_source`（多版本混用直接失败）；
+- 本契约是 **1 cue ↔ 1 旁白行**：字幕 cue 的起止必须**贴合**该行声段（含真实 offset，容差 `--tol`），
+  "落在声段里面"不算——整句压成末尾 0.1s 会被拒；
 - 时间线自带 `subtitle_sha256` / `audio_sha256` / `final_sha256` 三份**内容摘要**；
 - 字幕文件的内容摘要 == 声明值；字幕段数 == 旁白行数；**逐条**字幕文本 == 该行口播稿，
   且起止落在该行的成片区间之内；
@@ -199,7 +201,23 @@ outcome(实际结果)
 所以一份过期或伪造的独立报告不能替代现场判定。`ready` 还会把审计的 warnings / `unverified`
 原样带进自己的产物——无原声、稀疏采集、人工声明项这些限制**不允许在门槛里被吞掉**。
 
-### 4.1.1 制作 receipt：同一次制作的绑定
+### 4.1.1 recipe → adopted：首次制作不许为了拿摘要重跑一遍
+
+三份输出的内容摘要在**产出之前根本不存在**。所以：
+
+- **输入 recipe 允许占位**（`@PENDING@` / `-`）；它由人写语义字段（阶段、锚点、口播稿……）；
+- 制作路径（`tools/voice/build_sample.sh`）在收尾时从**真实 EDL + 实测片段/声长**生成一份
+  **新的** `adopted-timeline.tsv`：把占位换成实际摘要、补上真实 `audio_offset_s` 与
+  `hold_burned_in`，并核对 recipe 与 EDL 一致（镜头顺序、源区间、1x speed、freeze、
+  口播文本、实测声长、offset）；
+- 交付给 `ready` 的是这份 **adopted** 版本，**adopted 输出不允许占位**；
+- 因此**首次一次 build 就能闭环**，不需要"先跑一遍拿摘要、填回 recipe、再跑一遍"——那是重复渲染。
+
+**本组装器支持的形态（超出就明确失败并保持 draft，不假装通用）**：单源视频、1x 速度、
+EDL 的 `src_start/src_end/offset/freeze/字幕文本`，以及能把标注烧进画面的 freeze
+（需要 ffmpeg 的 `drawtext`）。变速、多源拼接、复杂转场交给你自己的编辑器。
+
+### 4.1.2 制作 receipt：同一次制作的绑定
 
 四份内容摘要只说明"时间线里写的 hash == 现在磁盘上的文件"，**不说明这些产物是同一次做出来的**：
 拿一份旧成片、再手写一份声称旧 hash 的时间线，也能对上。所以交付时还要一份
@@ -214,7 +232,13 @@ outcome(实际结果)
 ```
 
 审计会核对：receipt 里的 timeline 摘要 == 这一份 timeline；三份产物摘要 == 现在的文件；
-`sources` 与 preflight 台账逐条一致。任何一条不符 → "不是同一次制作"。
+**`source_video` 的摘要 ∈ timeline 用到的素材（preflight 台账）**；`sources` 与台账逐条一致；
+给了 `--edl` 时还要 receipt 的 EDL 摘要与它相符。任何一条不符 → "不是同一次制作"。
+
+> 为什么还要 `source_video`：只把 preflight 台账抄进 receipt 是不够的——
+> 台账写 A、实际 `SRC_VIDEO` 给的是 B（同长不同画面），抄出来的 receipt 依然"自洽"。
+> 制作路径现在在**渲染前**就核对 `sha256(SRC_VIDEO)` 与台账里那个 asset 一致，并把**实际读过**的
+> 摘要写进 receipt。
 
 **边界要说清楚**：receipt **没有签名**，防不了蓄意伪造。它的作用是让"复用旧媒体 + 新造声明"
 变成一次明显的、会被逐条比对拦下的不一致，而不是一个默认通过的路径。
@@ -266,6 +290,9 @@ rec-win       | f31           | 1389.0-1393.0
 - `speed/freeze` 里登记了冻结（`freeze > 0`），就必须有 `hold_mark`，且标注里要写出
   **被保持的是哪一帧的源时间码**。没有标注的长静帧 = 失败。理由：观众分不清
   "这是有意定格"还是"渲染卡住了"，而复盘时也分不清它是有意为之还是漏剪。
+- 还要 `hold_burned_in: yes`：**表格里有 mark 不等于画面已标注**。制作路径（`build_sample.sh`）
+  只能用片段末帧做定格——声明的锚点必须就是那一帧，否则它会明确失败并保持 draft
+  （复杂定格交给你自己的编辑器）；本机 ffmpeg 没有 `drawtext` 时同样 fail-closed。
 - 保持帧锚点还要落在**旁白引用区间**（`anchor_source`）之内：定格停在你说到的那一段之外，
   等于说的和看的是两回事。
 - **奖励保持帧**（`event_phase` 或 `claim_phase` 为 `reward`）还必须写明
@@ -277,8 +304,11 @@ rec-win       | f31           | 1389.0-1393.0
 旁白的占位是**声段**，不是它所在的画面窗口：
 
 ```
-声段 = [final_range 起点, final_range 起点 + 实测 audio_duration_s]
+声段 = [final_range 起点 + audio_offset_s, 同上 + 实测 audio_duration_s]
 ```
+
+`audio_offset_s` 是这一段的配音在窗口内**真实的**起点偏移（来自 EDL，由制作路径写进 adopted
+时间线），不是"一般 ~0.2s"的经验假设；多段声段取**并集**后与静默 gap 同口径，旁白占比也用它。
 
 一段 60 秒的画面只配了 1 秒旁白，就只有 1 秒有声，剩下 59 秒是静默；把画面窗口当成有声区间
 会把"整段没解说"算成"整段都在讲"。声段之间取并集后，才从**实际采用的时间线**算出所有
@@ -373,6 +403,10 @@ python3 "$C" ready  review-sheet.md --final-mp4 /abs/final.mp4 \
 - 修复后重跑受影响检查；**仍不能确认的事实如实挂起**（记 `unknown`），**不无限循环**。
 
 ### 7.0 制作路径与交付路径是同一条：绕过去就是 draft
+
+制作路径在收尾时会生成 `adopted-timeline.tsv`（见 §4.1.1）与 `produce-receipt.json`，
+然后用 `ready` 用的**同一个** checker 审计它们；产出 `ready` 要用的就是这份 adopted 版本
+（`ready ... --timeline <out>/adopted-timeline.tsv --receipt <out>/produce-receipt.json [--edl edl.tsv]`）。
 
 `tools/voice/build_sample.sh` **默认就会调用**与 `ready` 同一个 checker、同一套规则的采用时间线审计：
 
