@@ -962,26 +962,45 @@ def build_audit_payload(timeline: Path, preflight_path: Path, ledger_path: Path,
         rep.error(f"字幕内容 hash 不符：timeline 声明 {next(iter(want_sub))[:12]}…，"
                   f"实际 {binding['subtitle_sha256'][:12]}… -> 这不是这一版时间线的字幕"
                   f"（同段数改词/改时间也照样失败）")
-    if len(cues) != len(narration_rows):
-        rep.error(f"字幕段数 {len(cues)} != 旁白行数 {len(narration_rows)} -> "
-                  f"字幕不是从这一版采用时间线生成的")
-    elif cues:
+    if cues:
+        # 一条口播可以**分页**成多条 cue（短语分页），所以绑定口径不是"1 cue ↔ 1 行"，
+        # 而是两条合起来仍然挡得住"拿旧字幕糊弄"的规则：
+        #   a) 这一行所有 cue 的文本拼起来 == 这一行的稿（同段数改词照样失败）；
+        #   b) 这些 cue 的**并集**严丝合缝等于这一行的实际声段（含真实 offset）——
+        #      整句压成末尾 0.1s 会在这里失败，因为并集起点对不上。
         ordered = sorted(narration_rows, key=lambda r: r["final"][0])
-        text_bad = [r["event_id"] for cue, r in zip(cues, ordered) if norm(cue["text"]) != r["text"]]
-        timing_bad = []
-        for cue, r in zip(cues, ordered):
+        spans = []
+        for r in ordered:
             s0 = r["final"][0] + (r["audio_offset_s"] or 0.0)
-            s1 = s0 + (r["audio_duration_s"] or 0.0)
-            # 本契约是 **1 cue ↔ 1 旁白行**：起止要贴合实际声段，不是"落在里面就行"
-            # （否则整句压成末尾 0.1s 也会通过）。容差是显式允许的同步容差。
-            if abs(cue["start"] - s0) > tol or abs(cue["end"] - s1) > tol:
-                timing_bad.append(r["event_id"])
+            spans.append((s0, s0 + (r["audio_duration_s"] or 0.0)))
+        buckets: list = [[] for _ in ordered]
+        stray = []
+        for cue in cues:
+            mid = (cue["start"] + cue["end"]) / 2.0
+            hit = next((i for i, (s0, s1) in enumerate(spans) if s0 - tol <= mid <= s1 + tol), None)
+            (buckets[hit] if hit is not None else stray).append(cue)
+        if stray:
+            rep.error(f"有 {len(stray)} 条字幕落在任何旁白行的时间窗之外（最早 "
+                      f"{stray[0]['start']:.2f}s）-> 字幕不是从这一版采用时间线生成的")
+        text_bad, span_bad = [], []
+        for r, (s0, s1), group in zip(ordered, spans, buckets):
+            if not group:
+                span_bad.append(r["event_id"])
+                continue
+            group.sort(key=lambda c: c["start"])
+            if norm("".join(c["text"] for c in group)) != r["text"]:
+                text_bad.append(r["event_id"])
+            ok = abs(group[0]["start"] - s0) <= tol and abs(group[-1]["end"] - s1) <= tol
+            ok = ok and all(abs(a["end"] - b["start"]) <= tol for a, b in zip(group, group[1:]))
+            ok = ok and all(c["start"] >= s0 - tol and c["end"] <= s1 + tol for c in group)
+            if not ok:
+                span_bad.append(r["event_id"])
         if text_bad:
             rep.error(f"字幕文本与该段口播稿不一致（同段数但改了词）：{', '.join(text_bad[:4])}"
                       f" -> 字幕必须是实际采用稿，不是另写一份")
-        if timing_bad:
-            rep.error(f"字幕起止没有贴合该段的实际声段（含真实 offset，容差 {tol}s）："
-                      f"{', '.join(timing_bad[:4])} -> 整句压成末尾一小段也算不合格；"
+        if span_bad:
+            rep.error(f"字幕没有严丝合缝覆盖该段的实际声段（含真实 offset，容差 {tol}s）："
+                      f"{', '.join(span_bad[:4])} -> 整句压成末尾一小段也算不合格；"
                       f"字幕必须是这一版配音对齐的产物")
 
     # 音轨：内容 hash + 时长 + **真的有音轨**

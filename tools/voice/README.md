@@ -1,12 +1,15 @@
-# tools/voice — TTS adapter, EDL assembler, subtitle burner
+# tools/voice — TTS adapter, EDL assembler, subtitles, subtitle burner
 
-Three small, independent pieces. None of them is a video editor, and none of them ships a model.
+Small, independent pieces. None of them is a video editor, and none of them ships a model.
 
 | File | Does | Needs |
 |---|---|---|
 | `tts_adapter.py` | **Optional external adapter.** Turns a segment spec into measured audio files, with a content-addressed cache | **Your** endpoint + key (`TTS_BASE_URL`, `TTS_API_KEY`) |
-| `build_sample.sh` | Assembles source ranges + narration into a playable cut, with subtitles | `ffmpeg`, a 7-column EDL, a voice directory |
-| `burn_subs.py` | Burns an SRT into an MP4 without libass/drawtext | `ffmpeg`, Pillow |
+| `make_cut.sh` | **The delivery-default wrapper**: preflight -> decide source audio (keep+duck / record-and-continue) -> force `BURN_SUBS=1` -> adopted-timeline audit | `ffmpeg`, same inputs as below |
+| `build_sample.sh` | Assembles source ranges + narration into a playable cut, with paged subtitles; optionally burns them and mixes source audio (historical defaults unchanged) | `ffmpeg`, a 7-column EDL, a voice directory |
+| `subtitles.py` | Splits one narration span into phrase-sized cues; writes SRT and a **true-size** ASS (PlayRes = video size) | python3 only |
+| `burn_subs.py` | Burns an SRT into an MP4 with **libass** (`ass=` filter) | `ffmpeg` **with libass** |
+| `check_burned_subs.py` | Pixel-diffs the burned cut against the unburned one: is each cue really on screen, in-band, unclipped, off the protected UI band | `ffmpeg`, `ffprobe` |
 
 ---
 
@@ -125,20 +128,74 @@ place and got truncated by `-shortest`, leaving a cut whose only visible symptom
 length. Segment audio is also clamped to its window in both directions (trim if long, pad if short)
 and the final audio/video durations must match within tolerance, or the build fails.
 
-Outputs: `final.mp4`, `subs.srt`, plus `video_raw.mp4`, `voice_master.wav` and per-segment
-intermediates for inspection.
+Outputs: `final.mp4`, `subs.srt`, `subs.ass`, plus `video_raw.mp4`, `voice_master.wav` and per-segment
+intermediates for inspection. With `BURN_SUBS=1` the subtitle burn happens **before** the receipt is
+written, so the receipt and the audit bind the file you actually deliver, and the unburned cut is kept
+as `final-nosub.mp4` for the pixel check.
+
+Two optional behaviours, both off by default:
+
+```bash
+# burn subtitles into the delivered cut (needs ffmpeg with libass)
+BURN_SUBS=1 SRC_VIDEO=/abs/rec.mp4 bash build_sample.sh edl.tsv voice_dir out_dir
+
+# keep the source's own audio and mix it under the narration (ducked by the narration)
+KEEP_SRC_AUDIO=1 SRC_AUDIO_GAIN=-8 SRC_AUDIO_DUCK=1 \
+  SRC_VIDEO=/abs/rec-with-audio.mp4 bash build_sample.sh edl.tsv voice_dir out_dir
+```
+
+`KEEP_SRC_AUDIO=1` slices the source audio with the **same EDL**, clamps it to the same window as the
+picture, and mixes it with the narration (`src_audio.wav` and `voice_master.wav` stay as separate
+stems). If the source has no audio track at all, the build **fails** instead of handing you a silent
+track pretending to be game audio.
 
 ---
 
-## `burn_subs.py` — burn subtitles when ffmpeg has no libass
+## `subtitles.py` + `burn_subs.py` — page the cues, then burn with libass
 
 ```bash
-python3 burn_subs.py in.mp4 subs.srt out.mp4 [--w 960] [--font /path/to/font.ttc] [--size 30]
+python3 subtitles.py build --cues cues.tsv --srt subs.srt --ass subs.ass --w 960 --h 966 \
+    [--font "Hiragino Sans GB"] [--size 28] [--margin-v 16] [--margin-lr 100] [--max-chars 0]
+python3 burn_subs.py in.mp4 subs.srt out.mp4 [--labels holds.tsv] [--font NAME] [--size 28]
 ```
 
-Some ffmpeg builds ship without `subtitles`/`drawtext`. This renders each cue to a transparent PNG
-with Pillow and composites it with `overlay ... enable='between(t,a,b)'`. The default font path is a
-**macOS system font**; pass `--font` anywhere else. Requires `pip install Pillow`.
+Three things here are not style choices, they are fixed incidents:
+
+1. **One narration span is not one cue.** A 25-character line rendered as a single cue wraps to three
+   lines and presses into the HUD. `subtitles.py` splits the span into phrase-sized cues and hands each
+   cue a share of the **measured** duration.
+2. **PlayResX/PlayResY must equal the video size.** SRT→ASS defaults to a 384×288 script space, so the
+   FontSize/MarginV in `subtitles=...:force_style=...` get scaled by ≈3.35× on a 966-pixel-tall picture.
+   `burn_subs.py` reads the real size with `ffprobe` and writes ASS itself.
+3. **ASS timestamps go through total centiseconds.** `int(round(t % 1 * 100))` turns 0.999 into `.100`.
+
+The old Pillow + temporary-PNG + `overlay` chain is **gone on purpose**: on a long cut it burned only
+the first cue (74 cues in, 1 on screen), and once the temp directory was gone the result could not be
+reproduced. There is no PNG fallback — a build without libass fails and says so.
+
+---
+
+## `check_burned_subs.py` — does the subtitle actually exist on screen?
+
+```bash
+python3 check_burned_subs.py --video out/final.mp4 --baseline out/final-nosub.mp4 \
+    --subs out/subs.srt --band 900:966 --protect 655:845 --margin-x 40 --json subs-check.json
+```
+
+Counting SRT cues and hashing the file proves nothing about the picture. This samples a frame at each
+cue (long cues get a second sample near their end), diffs it against the **same frame of the unburned
+cut**, and reports per cue: pixels inside the subtitle band, pixels outside it, pixels inside the
+left/right safety margin (a clipped final character), and pixels inside the protected band (hand cards,
+key UI). It also reports the widest cue's pixels-per-character so a truncated tail shows up.
+
+Out-of-band and margin pixels are judged against an **explicit noise tolerance** (burn-in re-encodes
+the picture, so some out-of-band difference is expected); `--min-text-px` must be greater than zero,
+because a zero threshold would let a cut with no subtitles at all "pass".
+
+It does **not** judge listening quality, whether the subtitle matches what was said, whether the line
+breaks read well, **or which characters were drawn**. `px/字` is printed as a diagnostic only: a pixel
+difference can prove something was painted here, never that the right word (or its final character)
+is on screen. `not_a_verdict_on` says so in the report.
 
 ---
 
@@ -146,8 +203,10 @@ with Pillow and composites it with `overlay ... enable='between(t,a,b)'`. The de
 
 ```bash
 # from the repository root
-python3 tests/test_build_sample.py     # 4 cases: overlong rejected, freeze honoured,
-                                       # length mapping, bad header rejected
+python3 tests/test_subtitles.py        # 5 cases: paging, ASS carry, PlayRes, escaping
+python3 tests/test_build_sample.py     # 13 cases: overlong rejected, freeze honoured, length mapping,
+                                       # bad header rejected, burn + pixel check, wrong-band detection,
+                                       # source-audio mix / silent-source refusal, no-text refusal
 python3 tests/test_tts_guarantees.py   # 51 cases against a local fake endpoint (loopback only)
 ```
 

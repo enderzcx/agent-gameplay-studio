@@ -20,6 +20,10 @@
       "why": "审片问题单与局部修复规范"
     },
     {
+      "prompt": "使用 gameplay-postproduction，处理这段录屏，做完解析解说、配音、剪辑、字幕、审听审片、局部修正并交付",
+      "why": "一句话端到端：本 skill 必须按 references/runbook.md 自己推进到成片与诚实验收，不得停在计划或“先做样片等批准”；缺依赖/缺授权/素材不足要如实报错"
+    },
+    {
       "prompt": "把这款新游戏的录屏后期规范固化下来，以后复用",
       "why": "为该游戏增加 <game>-checklist.md，扩展本 skill"
     },

@@ -16,7 +16,9 @@ Nothing here re-licenses third-party work. No third-party source is vendored.
 | `tools/gamerec/**` | Author's own work | Swift/ScreenCaptureKit recorder; renamed and de-branded for this package (see below) |
 | `tools/voice/tts_adapter.py` | Author's own project script, adapted | Was a project-local client for one vendor. Now endpoint-neutral and env-configured, with no baked-in endpoint or voice — but it is **not** a cross-vendor abstraction; it targets one wire shape only |
 | `tools/voice/build_sample.sh` | Author's own work, adapted | Removed a private default source path and a hardcoded crop |
-| `tools/voice/burn_subs.py` | Author's own work | Unmodified; needs user-installed Pillow |
+| `tools/voice/burn_subs.py` | Author's own work, rewritten for this package | Burn-in now goes through ffmpeg **libass** with a `PlayRes` equal to the real video size. The previous Pillow + temporary-PNG + `overlay` chain was removed because it burned only the first cue on a long cut and depended on a temp directory |
+| `tools/voice/subtitles.py` | Author's own work, extracted from the same project | Phrase-level cue paging and SRT/ASS writing; carries the total-centisecond ASS timestamp fix |
+| `tools/voice/check_burned_subs.py` | Authored for this package | Pixel-diff subtitle check (burned vs unburned cut). Standard library + ffmpeg only |
 | `tests/*.py`, `tests/run_offline_tests.sh` | Author's own work | `test_build_sample.py` came from the same project; the checker suite is new for this package |
 | `examples/**` | **Authored for this package** | Fully synthetic. Contains no real footage, gameplay, audio, timeline or result |
 | `README*.md`, `docs/**`, `NOTICE.md`, `SECURITY.md`, `CHANGELOG.md`, `Makefile`, `.env.example` | Authored for this package | |
@@ -80,8 +82,7 @@ support for that game or any other. Every other game is unadapted; the absence o
 | Dependency | Needed for | License/availability |
 |---|---|---|
 | Python 3.9+ | everything | PSF license |
-| `ffmpeg` / `ffprobe` | media probing, cut assembly, `ready` mode | LGPL/GPL depending on build — install it yourself |
-| Pillow | `tools/voice/burn_subs.py` only | MIT-CMU; install it yourself |
+| `ffmpeg` / `ffprobe` | media probing, cut assembly, **subtitle burn-in**, `ready` mode | LGPL/GPL depending on build — install it yourself. Burn-in additionally needs a build with **libass** (`ffmpeg -filters \| grep ass`) |
 | Xcode command-line tools (`swiftc`, `codesign`) | compiling `tools/gamerec/` | Apple terms |
 | macOS 15+ | `tools/gamerec/` only | Apple terms |
 

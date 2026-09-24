@@ -23,7 +23,9 @@ independent tools. It is not a framework, not an application, and not an editor.
 │ tools/gamerec/        │   │ tools/voice/         │   │ your editor / your    │
 │ capture target app's  │   │ tts_adapter.py       │   │ video-understanding   │
 │ audio + picture       │   │ build_sample.sh      │   │ channel               │
-│ (macOS, Swift)        │   │ burn_subs.py         │   │ (NOT bundled)         │
+│ (macOS, Swift)        │   │ subtitles.py         │   │ (NOT bundled)         │
+│                       │   │ burn_subs.py         │   │                       │
+│                       │   │ check_burned_subs.py │   │                       │
 └───────────────────────┘   └──────────────────────┘   └───────────────────────┘
 ```
 
