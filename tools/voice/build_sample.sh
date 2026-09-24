@@ -5,22 +5,36 @@
 #   1. 源区间 1x 取证，不改动作速度；EDL 只剪掉无信息等待
 #   2. 旁白**压在画面之上**；每段配音按**实测时长**驱动
 #   3. 中间产物无损；终混 48k；响度/true peak 归一化
-#   4. 字幕由实际口播稿生成，随实测时长对齐
+#   4. 字幕由实际口播稿生成，随实测时长对齐；**长句按短语分页**（一条口播 ≠ 一条 cue），
+#      并写出 **PlayRes = 视频尺寸** 的 ASS（SRT→ASS 默认 384×288 会把字号放大 3.35×）
 #   5. **校验优先于导出**：任何一段音频放不进它的画面窗口，就**在制作前失败**，
 #      不允许"先警告再导出"——那会让超长音频把后续所有句子推迟，
 #      最后被 -shortest 截尾，而人只看得到成片长度不对。
-#   6. **成片音轨只有旁白，不混源片原声**：
+#   6. **成片音轨默认只有旁白**：
 #      · 每个画面片段都用 `-an` 渲染（源音轨在切片段阶段就被丢掉）；
 #      · 终片音轨完全由 `voice_master.wav` 构成，而它只拼接 voice_dir 里的旁白段。
-#      也就是说：**本脚本永远不会悄悄把源片原声带进成片**。源片是静音就如实出静音成片，
-#      不伪造游戏原声；若你确实要保留/压低原声，必须自己在成片之后显式混轨
-#      （这是有意留给调用方的决定，不是本脚本的默认行为）。
+#      也就是说：**本脚本不会悄悄把源片原声带进成片**。源片是静音就如实出静音成片，
+#      不伪造游戏原声。
+#      源片**确实有原声**、且你要保留时，显式开 `KEEP_SRC_AUDIO=1`：脚本会把每个片段的
+#      源音轨按同一 EDL 切出来、拼成与画面等长的 `src_audio.wav`，再与旁白分轨混音
+#      （默认 `SRC_AUDIO_DUCK=1`，用旁白做 sidechain 把原声压下去）。源片没有音轨时
+#      **直接失败报错**，不会给你一条静音轨冒充原声。
 #
 # 用法:
 #   SRC_VIDEO=/path/to/source.mp4 build_sample.sh <edl.tsv> <voice_dir> <out_dir>
 #
 # 环境变量（**没有私有默认值**，源视频必须显式给）：
 #   SRC_VIDEO   源录屏文件（必需）
+#   BURN_SUBS   1 = 用 libass 把字幕烧进成片（默认 0，只出 subs.srt/subs.ass）。
+#               烧录发生在**写 receipt 之前**，所以 receipt/审计绑定的是真正交付的那个文件；
+#               未烧版留在 final-nosub.mp4，供像素级字幕抽检做对照。
+#   KEEP_SRC_AUDIO  1 = 保留源片原声并与旁白分轨混音（默认 0）。源片无音轨 → 直接失败。
+#   SRC_AUDIO_GAIN  原声增益（dB，默认 -8）
+#   SRC_AUDIO_DUCK  1 = 旁白说话时把原声压下去（默认 1）；0 = 只做固定增益叠加
+#   SUB_FONT / SUB_SIZE / SUB_MARGIN_V / SUB_MARGIN_LR   字幕样式（默认 Hiragino Sans GB /
+#               28 / 16 / 100，与 960×966 实测可读的那一版一致）
+#   SUB_MAX_CHARS   单条字幕最多几个全角字；0 = 按画面宽度自动算
+#   SUB_BAND / SUB_PROTECT  可选：给 `check_burned_subs.py` 用的字幕带与保护带（y0:y1）
 #   TIMELINE / PREFLIGHT / SILENCE_LEDGER   可选：给了就在导出后**现场跑采用时间线审计**
 #               （与 `ready` 门槛同一个 checker、同一套规则），并在制作完成的这一刻写出
 #               `produce-receipt.json`（把 timeline 与字幕/音轨/成片绑在同一制作上）。
@@ -63,6 +77,16 @@ FPS="${OUT_FPS:-30}"                       # 降采样，不补帧
 TARGET_I="${TARGET_I:--16}"; TARGET_TP="${TARGET_TP:--1.5}"
 FIT_TOL="${FIT_TOL:-0.05}"                 # 旁白放得下的容差（秒）
 SYNC_TOL="${SYNC_TOL:-0.15}"               # 终片音视频时长一致容差（秒）
+BURN_SUBS="${BURN_SUBS:-0}"                # 1 = 用 libass 把字幕烧进交付成片
+KEEP_SRC_AUDIO="${KEEP_SRC_AUDIO:-0}"      # 1 = 保留源原声并与旁白分轨混音
+SRC_AUDIO_GAIN="${SRC_AUDIO_GAIN:--8}"     # 原声增益 dB
+SRC_AUDIO_DUCK="${SRC_AUDIO_DUCK:-1}"      # 1 = 旁白说话时压低原声
+SUB_FONT="${SUB_FONT:-Hiragino Sans GB}"; SUB_SIZE="${SUB_SIZE:-28}"
+SUB_MARGIN_V="${SUB_MARGIN_V:-16}"; SUB_MARGIN_LR="${SUB_MARGIN_LR:-100}"
+SUB_MAX_CHARS="${SUB_MAX_CHARS:-0}"
+BURN="$HERE/burn_subs.py"; SUBS_PY="$HERE/subtitles.py"
+# 字体名会写进 ASS 头；带换行/大括号就能注入 ASS 指令，这里直接拒绝。
+case "$SUB_FONT" in *[!A-Za-z0-9\ _-]*) echo "!! SUB_FONT 含可疑字符：$SUB_FONT" >&2; exit 2;; esac
 
 command -v ffmpeg >/dev/null || { echo "需要 ffmpeg" >&2; exit 2; }
 [ -f "$TL" ] || { echo "找不到 EDL: $TL" >&2; exit 2; }
@@ -146,14 +170,21 @@ fi
 # ---------------------------------------------------------------- 制作
 mkdir -p "$OUT/concat" "$OUT/seg_norm"
 OUT="$(cd "$OUT" && pwd)"   # 绝对路径：ffmpeg concat 按列表文件所在目录解析相对路径
-: > "$OUT/concat/video.txt"; : > "$OUT/concat/audio.txt"; : > "$OUT/subs.srt"
+: > "$OUT/concat/video.txt"; : > "$OUT/concat/audio.txt"; : > "$OUT/cues.tsv"
+if [ "$KEEP_SRC_AUDIO" = "1" ]; then
+  # 源片必须真的有音轨，否则"保留原声"就是在造假
+  if [ -z "$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_type -of csv=p=0 "$SRC" </dev/null)" ]; then
+    mkdir -p "$OUT"
+    draft "KEEP_SRC_AUDIO=1，但源片 $SRC 没有音轨（拒绝用静音轨冒充游戏原声）"
+    exit 3
+  fi
+  : > "$OUT/concat/srcaudio.txt"
+fi
 MEASURED="$OUT/adopt/measured.tsv"
 if [ "$WANT_ADOPT" -eq 1 ]; then
   printf 'seg\twindow\tnarration_duration\toffset\tfinal_start\tfinal_end\n' > "$MEASURED"
 fi
 t_cursor=0; i=0
-
-hh() { python3 -c "import sys;m=int(sys.argv[1]);print('%02d:%02d:%02d,%03d'%(m//3600000,m//60000%60,m//1000%60,m%1000))" "$1"; }
 
 # 跳过表头
 tail -n +2 "$TL" | while IFS=$'\t' read -r seg ss se afile off freeze text; do
@@ -209,16 +240,33 @@ tail -n +2 "$TL" | while IFS=$'\t' read -r seg ss se afile off freeze text; do
   fi
   printf "file '%s'\n" "$anorm" >> "$OUT/concat/audio.txt"
 
+  # 源原声：按**同一 EDL**切出来、并用同样的 atrim/apad 夹到窗口长度，
+  # 这样它与画面严格等长，后面才能真的分轨混音（而不是"大致对一下"）。
+  if [ "$KEEP_SRC_AUDIO" = "1" ]; then
+    snorm="$OUT/seg_norm/s$n.wav"
+    ffmpeg -nostdin -v error -y -ss "$ss" -to "$se" -i "$SRC" -vn \
+      -af "volume=${SRC_AUDIO_GAIN}dB,atrim=0:${cdur},apad=whole_dur=${cdur}" \
+      -ar 48000 -ac 2 -c:a pcm_s16le "$snorm"
+    sout=$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "$snorm" </dev/null)
+    if ! python3 -c "import sys;sys.exit(0 if abs(float('$sout')-float('$cdur'))<=0.02 else 1)"; then
+      echo "!! seg $i 源原声段长 ${sout}s ≠ 窗口 ${cdur}s。已中止。" >&2
+      exit 3
+    fi
+    printf "file '%s'\n" "$snorm" >> "$OUT/concat/srcaudio.txt"
+  fi
+
   if [ "$WANT_ADOPT" -eq 1 ]; then
     printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$i" "$cdur" "$adur" "$off" "$t_cursor" \
       "$(python3 -c "print(round(float('$t_cursor')+float('$cdur'),6))")" >> "$MEASURED"
   fi
 
-  # 没有口播的行（例如纯画面收尾）不写字幕
+  # 没有口播的行（例如纯画面收尾）不写字幕。
+  # 这里只登记"这段口播覆盖的实测时间窗"，分页（长句拆成多条短语 cue）在后面统一做：
+  # 一条口播 ≠ 一条字幕 cue。
   if [ -n "${text// /}" ]; then
     ms=$(python3 -c "print(int((float('$t_cursor')+float('$off'))*1000))")
     me=$(python3 -c "print(int((float('$t_cursor')+float('$off')+float('$adur'))*1000))")
-    { echo "$n"; echo "$(hh $ms) --> $(hh $me)"; echo "$text"; echo; } >> "$OUT/subs.srt"
+    printf '%s\t%s\t%s\n' "$ms" "$me" "$(printf '%s' "$text" | tr '\t' ' ')" >> "$OUT/cues.tsv"
   fi
 
   t_cursor=$(python3 -c "print(round(float('$t_cursor')+float('$cdur'),3))")
@@ -232,6 +280,29 @@ ffmpeg -nostdin -v error -y -f concat -safe 0 -i "$OUT/concat/audio.txt" -c:a pc
 ffmpeg -nostdin -v error -y -i "$OUT/voice_raw.wav" -af "loudnorm=I=${TARGET_I}:TP=${TARGET_TP}:LRA=9" \
   -ar 48000 -ac 2 -c:a pcm_s16le "$OUT/voice_master.wav"
 
+# ---------------------------------------------------------------- 字幕（长句分页 + 真尺寸 ASS）
+# 分页与 ASS 生成在 subtitles.py 里：ASS 时间戳走总厘秒进位，PlayRes 用**视频真实尺寸**。
+if [ ! -s "$OUT/cues.tsv" ]; then
+  draft "EDL 里没有任何字幕文本：拒绝产出一个没有字幕的成片"
+  exit 3
+fi
+WH=$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height \
+      -of csv=p=0:nk=1 "$OUT/video_raw.mp4" </dev/null | head -1)
+SUB_W="${WH%,*}"; SUB_H="${WH#*,}"
+LABELS_FILE=""
+if [ -f "$OUT/hold-labels.tsv" ]; then LABELS_FILE="$OUT/hold-labels.tsv"; fi
+python3 "$SUBS_PY" build --cues "$OUT/cues.tsv" --srt "$OUT/subs.srt" --ass "$OUT/subs.ass" \
+  --w "$SUB_W" --h "$SUB_H" --font "$SUB_FONT" --size "$SUB_SIZE" \
+  --margin-v "$SUB_MARGIN_V" --margin-lr "$SUB_MARGIN_LR" --max-chars "$SUB_MAX_CHARS" \
+  --labels "$LABELS_FILE"
+
+SRC_AUDIO=""
+if [ "$KEEP_SRC_AUDIO" = "1" ]; then
+  ffmpeg -nostdin -v error -y -f concat -safe 0 -i "$OUT/concat/srcaudio.txt" \
+    -c:a pcm_s16le "$OUT/src_audio.wav"
+  SRC_AUDIO="$OUT/src_audio.wav"
+fi
+
 # 音视频必须一样长：不等就是有段被 -shortest 截了，必须失败而不是交付
 vd=$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "$OUT/video_raw.mp4" </dev/null)
 ad=$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "$OUT/voice_master.wav" </dev/null)
@@ -240,14 +311,68 @@ if ! python3 -c "import sys;sys.exit(0 if abs(float('$vd')-float('$ad'))<=float(
   echo "   这通常意味着某段旁白放不进窗口、把后面全部推迟后被 -shortest 截断。拒绝导出。" >&2
   exit 3
 fi
+if [ -n "$SRC_AUDIO" ]; then
+  sd=$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "$SRC_AUDIO" </dev/null)
+  if ! python3 -c "import sys;sys.exit(0 if abs(float('$sd')-float('$vd'))<=float('$SYNC_TOL') else 1)"; then
+    echo "!! 源原声轨 ${sd}s 与画面 ${vd}s 不等长：不允许混一条对不上的原声。" >&2
+    exit 3
+  fi
+fi
 
 echo "--- loudness / true peak ---"
 ffmpeg -nostdin -hide_banner -nostats -i "$OUT/voice_master.wav" -af ebur128=peak=true -f null - 2>&1 \
   | sed -n '/Summary/,/True peak/p' | head -14
 
-ffmpeg -nostdin -v error -y -i "$OUT/video_raw.mp4" -i "$OUT/voice_master.wav" \
-  -map 0:v -map 1:a -c:v copy -c:a aac -b:a 192k -shortest "$OUT/final.mp4"
+# 终混：默认只有旁白；显式 KEEP_SRC_AUDIO=1 才是「原声 + 旁白」分轨混音。
+if [ -n "$SRC_AUDIO" ]; then
+  # 注意：ffmpeg 的 filtergraph 里一个 label 只能被**消费一次**。
+  # 旁白既要当 sidechain 又要进终混，所以必须 asplit（用两次会报
+  # "Stream specifier 'voice' … matches no streams"，实测踩过）。
+  if [ "$SRC_AUDIO_DUCK" = "1" ]; then
+    # 旁白当 sidechain：它一说话就把原声压下去（release 放开），不会两条声音互相盖。
+    MIX="[1:a]aformat=sample_rates=48000:channel_layouts=stereo,asplit=2[voice][sc];"
+    MIX="${MIX}[2:a]aformat=sample_rates=48000:channel_layouts=stereo[src];"
+    MIX="${MIX}[src][sc]sidechaincompress=threshold=0.03:ratio=8:attack=5:release=250[duck];"
+    MIX="${MIX}[voice][duck]amix=inputs=2:duration=first:normalize=0,alimiter=limit=0.95[a]"
+  else
+    MIX="[1:a]aformat=sample_rates=48000:channel_layouts=stereo[voice];"
+    MIX="${MIX}[2:a]aformat=sample_rates=48000:channel_layouts=stereo[src];"
+    MIX="${MIX}[voice][src]amix=inputs=2:duration=first:normalize=0,alimiter=limit=0.95[a]"
+  fi
+  rm -f "$OUT/final.mp4"
+  if ! ffmpeg -nostdin -v error -y -i "$OUT/video_raw.mp4" -i "$OUT/voice_master.wav" -i "$SRC_AUDIO" \
+       -filter_complex "$MIX" -map 0:v -map "[a]" -c:v copy -c:a aac -b:a 192k -shortest "$OUT/final.mp4"; then
+    draft "终混失败（源原声 + 旁白）：没有可交付成片"
+    exit 3
+  fi
+  echo "已混入源原声：gain ${SRC_AUDIO_GAIN}dB duck=${SRC_AUDIO_DUCK}（分轨保留，未覆盖旁白母版）"
+else
+  rm -f "$OUT/final.mp4"
+  if ! ffmpeg -nostdin -v error -y -i "$OUT/video_raw.mp4" -i "$OUT/voice_master.wav" \
+       -map 0:v -map 1:a -c:v copy -c:a aac -b:a 192k -shortest "$OUT/final.mp4"; then
+    draft "终混失败（画面 + 旁白）：没有可交付成片"
+    exit 3
+  fi
+  echo "成片音轨 = 旁白（未混源原声；若源片确有原声而你要保留，显式 KEEP_SRC_AUDIO=1）"
+fi
+if [ ! -s "$OUT/final.mp4" ]; then
+  draft "终混产出为空文件：没有可交付成片"
+  exit 3
+fi
 echo "final: $OUT/final.mp4"
+
+# ---------------------------------------------------------------- 烧字幕（可选，但在交付前必须做）
+# 烧录放在**写 receipt 之前**：receipt/审计绑定的是真正交付的那个文件，不是一个中间物。
+# 未烧版留成 final-nosub.mp4，供 check_burned_subs.py 做逐像素对照。
+if [ "$BURN_SUBS" = "1" ]; then
+  mv "$OUT/final.mp4" "$OUT/final-nosub.mp4"
+  if ! python3 "$BURN" "$OUT/final-nosub.mp4" "$OUT/subs.srt" "$OUT/final.mp4" \
+       --font "$SUB_FONT" --size "$SUB_SIZE" --margin-v "$SUB_MARGIN_V" \
+       --margin-lr "$SUB_MARGIN_LR" --labels "$LABELS_FILE" --json "$OUT/subs-burn.json"; then
+    draft "字幕烧录失败（libass）：没有可交付成片"
+    exit 3
+  fi
+fi
 ffprobe -v error -show_entries format=duration,size -show_entries stream=codec_type,codec_name,width,height,sample_rate,channels -of default=nw=1 "$OUT/final.mp4"
 
 # ---------------------------------------------------------------- 采用时间线审计（默认验收路径）

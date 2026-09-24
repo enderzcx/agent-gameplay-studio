@@ -1,37 +1,57 @@
 #!/usr/bin/env python3
-"""burn_subs.py — 把 SRT 烧进 MP4（不依赖 libass/drawtext）。
+"""burn_subs.py — 用 **libass** 把字幕烧进 MP4。
 
-本机 ffmpeg 8.1.1 **没有** `subtitles`/`drawtext` 滤镜（无 libass）。
-用 PIL 把每句字幕画成透明 PNG，再用 ffmpeg `overlay ... enable='between(t,a,b)'` 叠上去。
+为什么不用 `subtitles=subs.srt:force_style=...`（实测结论，见 2026-09-24 pilot）：
+  SRT→ASS 的默认脚本空间是 **384×288**，force_style 里的 FontSize/MarginV 是按那个空间解释的，
+  在 960×966 画面上会被放大约 3.35 倍（FontSize=30 → 约 100px、MarginV=18 → 约 60px），
+  结果每条 cue 渲染成 3 行并压到手牌带上。
+  → 正确做法：自己写 **PlayResX/PlayResY = 视频尺寸** 的 ASS，再交给 `ass=` 滤镜。
 
-用法: burn_subs.py <in.mp4> <subs.srt> <out.mp4> [--w 960] [--font /path/to.ttc] [--size 30]
+为什么不再用 PIL + 临时 PNG + overlay 链：
+  旧写法要把每条 cue 画成透明 PNG 再 `overlay enable=between(t,..)`，
+  长片上只烧进第 1 条（实测 74 条只进 1 条），且临时目录被清理后再也复现不出来。
+  现在只写文本 ASS，烧录全交给 ffmpeg，中间没有临时图、也没有 Pillow 依赖。
+
+用法:
+  burn_subs.py <in.mp4> <subs.srt> <out.mp4> [--labels holds.tsv]
+               [--font "Hiragino Sans GB"] [--size 28] [--margin-v 16] [--margin-lr 100]
+
+  --labels 是可选定格标注 TSV（start<TAB>end<TAB>text），会以 Label 样式烧在左上角。
+  真实尺寸从输入视频 ffprobe 读出，不靠调用方填 —— 填错就是那个 3.35 倍的事故。
 """
 from __future__ import annotations
 
 import argparse
-import re
+import json
+import shutil
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import subtitles as S  # noqa: E402
 
-DEFAULT_FONT = "/System/Library/Fonts/Hiragino Sans GB.ttc"
+
+def have_ass_filter() -> bool:
+    r = subprocess.run(["ffmpeg", "-hide_banner", "-filters"], capture_output=True, text=True)
+    return r.stdout.count(" ass ") > 0 or any(
+        line.split()[1:2] == ["ass"] for line in r.stdout.splitlines() if line.strip())
 
 
-def parse_srt(text: str) -> list[tuple[float, float, str]]:
-    out = []
-    for block in [b for b in text.strip().split("\n\n") if b.strip()]:
-        lines = block.split("\n")
-        m = re.match(r"(\d+):(\d+):(\d+),(\d+) --> (\d+):(\d+):(\d+),(\d+)", lines[1])
-        if not m:
-            continue
-        g = [int(x) for x in m.groups()]
-        st = g[0] * 3600 + g[1] * 60 + g[2] + g[3] / 1000
-        en = g[4] * 3600 + g[5] * 60 + g[6] + g[7] / 1000
-        out.append((st, en, "\n".join(lines[2:])))
-    return out
+def probe_wh(video: Path) -> tuple[int, int]:
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+         "stream=width,height", "-of", "csv=p=0:nk=1", str(video)],
+        capture_output=True, text=True, check=True).stdout.strip().splitlines()[0]
+    w, h = (int(x) for x in out.split(",")[:2])
+    return w, h
+
+
+def _has_audio(p: Path) -> bool:
+    r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a:0",
+                        "-show_entries", "stream=codec_type", "-of", "csv=p=0", str(p)],
+                       capture_output=True, text=True)
+    return bool(r.stdout.strip())
 
 
 def main() -> int:
@@ -39,61 +59,57 @@ def main() -> int:
     ap.add_argument("video")
     ap.add_argument("srt")
     ap.add_argument("out")
-    ap.add_argument("--w", type=int, default=960)
-    ap.add_argument("--font", default=DEFAULT_FONT)
-    ap.add_argument("--size", type=int, default=30)
+    ap.add_argument("--labels", default="", help="可选定格标注 TSV")
+    ap.add_argument("--font", default="Hiragino Sans GB")
+    ap.add_argument("--size", type=int, default=28)
+    ap.add_argument("--margin-v", type=int, default=16)
+    ap.add_argument("--margin-lr", type=int, default=100)
+    ap.add_argument("--crf", default="18")
+    ap.add_argument("--json", default="", help="把结果写进这个 JSON（给制作链路留证据）")
     a = ap.parse_args()
 
-    probe = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0",
-                            "-show_entries", "stream=width,height", "-of", "csv=p=0", a.video],
-                           capture_output=True, text=True, check=True).stdout.strip()
-    W, H = (int(x) for x in probe.split(",")[:2])
-    cues = parse_srt(Path(a.srt).read_text(encoding="utf-8"))
-    if not cues:
-        print("no cues", file=sys.stderr)
+    if shutil.which("ffmpeg") is None:
+        print("需要 ffmpeg", file=sys.stderr)
+        return 2
+    if not have_ass_filter():
+        print("!! 这个 ffmpeg 没有 libass（`ass` 滤镜）。\n"
+              "   本脚本不再提供 PNG overlay 后备：那条链在长片上会漏烧字幕。\n"
+              "   请装带 libass 的 ffmpeg（`ffmpeg -filters | grep ass`）。", file=sys.stderr)
         return 2
 
-    tmp = Path(tempfile.mkdtemp(prefix="subburn-"))
-    pngs = []
-    font = ImageFont.truetype(a.font, a.size, index=0)
-    for i, (st, en, text) in enumerate(cues, 1):
-        img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-        dr = ImageDraw.Draw(img)
-        wrapped, cur = [], ""
-        for ch in text.replace("\n", ""):
-            if dr.textlength(cur + ch, font=font) > W - 80:
-                wrapped.append(cur)
-                cur = ch
-            else:
-                cur += ch
-        wrapped.append(cur)
-        lh = int(a.size * 1.45)
-        y0 = H - int(H * 0.12) - lh * len(wrapped)
-        for j, ln in enumerate(wrapped):
-            x = (W - dr.textlength(ln, font=font)) / 2
-            y = y0 + j * lh
-            for dx in (-2, -1, 0, 1, 2):
-                for dy in (-2, -1, 0, 1, 2):
-                    if dx or dy:
-                        dr.text((x + dx, y + dy), ln, font=font, fill=(0, 0, 0, 255))
-            dr.text((x, y), ln, font=font, fill=(255, 255, 255, 255))
-        p = tmp / f"s{i}.png"
-        img.save(p)
-        pngs.append((p, st, en))
+    src, srt, out = Path(a.video), Path(a.srt), Path(a.out)
+    for label, p in (("输入视频", src), ("字幕", srt)):
+        if not p.is_file():
+            print(f"找不到{label}: {p}", file=sys.stderr)
+            return 2
 
-    parts = []
-    for i, (p, st, en) in enumerate(pngs, 1):
-        prev = "0:v" if i == 1 else f"v{i-1}"
-        nxt = "vout" if i == len(pngs) else f"v{i}"
-        parts.append(f"[{prev}][{i}:v]overlay=0:0:enable='between(t,{st},{en})'[{nxt}]")
-    cmd = ["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", a.video]
-    for p, _, _ in pngs:
-        cmd += ["-i", str(p)]
-    cmd += ["-filter_complex", ";".join(parts), "-map", "[vout]", "-map", "0:a",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
-            "-c:a", "copy", a.out]
+    w, h = probe_wh(src)
+    cues = S.parse_srt(srt.read_text(encoding="utf-8"))
+    if not cues:
+        print("字幕文件里没有可用 cue（拒绝产出一个没有字幕的“成片”）", file=sys.stderr)
+        return 2
+    labels = S.parse_labels_tsv(Path(a.labels)) if a.labels and Path(a.labels).is_file() else None
+    ass = out.with_name(out.stem + ".ass")
+    S.write_ass(cues, ass, w, h, font=a.font, size=a.size,
+                margin_v=a.margin_v, margin_lr=S.effective_margin_lr(w, a.margin_lr), labels=labels)
+
+    cmd = ["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(src),
+           "-vf", f"ass={ass}", "-c:v", "libx264", "-preset", "veryfast", "-crf", str(a.crf),
+           "-pix_fmt", "yuv420p"]
+    cmd += ["-c:a", "copy"] if _has_audio(src) else ["-an"]
+    cmd += [str(out)]
     subprocess.run(cmd, check=True)
-    print(f"wrote {a.out} ({len(pngs)} cues)")
+
+    dur = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                          "-of", "default=nw=1:nk=1", str(out)],
+                         capture_output=True, text=True).stdout.strip()
+    info = {"out": str(out), "ass": str(ass), "play_res": f"{w}x{h}", "cues": len(cues),
+            "labels": len(labels or []), "font": a.font, "font_size": a.size,
+            "margin_v": a.margin_v, "duration_s": float(dur)}
+    print(f"OK  {out}  cues={len(cues)}  labels={len(labels or [])}  dur={dur}s  "
+          f"(PlayRes {w}x{h}, FontSize {a.size}, MarginV {a.margin_v})")
+    if a.json:
+        Path(a.json).write_text(json.dumps(info, ensure_ascii=False, indent=1), encoding="utf-8")
     return 0
 
 

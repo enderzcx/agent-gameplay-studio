@@ -16,6 +16,12 @@ metadata:
 **实际的视频理解、剪辑、合成与导出由宿主提供的能力完成**（它们是可替换角色，见下）。
 换句话说：流程和验收标准在这里，执行通道由你提供。
 
+**它是什么，不是什么**（一句话要求端到端时照这个说）：
+它是**由 Agent 执行的 skill + 工具集**（规范 + 模板 + 检查器 + 一个短合成组装器 + 路由），
+**不是常驻服务，也不是确定性的"一键导演"**。同一句提示词不等于同一份成片：源素材、依赖、
+授权任何一项不满足，结果就不同。**依赖缺失、授权不足、源素材不够时如实报错，
+不保证任意素材自动出精品。** 具体执行顺序见 `references/runbook.md`。
+
 通用流程与游戏特有清单分层：通用部分对任何游戏成立，**特定游戏只写进 `references/<game>-checklist.md`**，
 没有该文件就表示**未适配**，不要假装已支持。
 
@@ -67,6 +73,7 @@ python3 "$REPO/skills/$SKILL/scripts/check_postproduction.py" --help
 
 | 需要做的事 | 读 |
 |---|---|
+| **一句话要求端到端时：默认执行顺序、每步命令、失败口径、多模态调用例** | **`references/runbook.md`（先读这个）** |
 | 完整流程与规则 | `references/postproduction-standard.md`（canonical） |
 | 具体游戏的特有清单 | `references/<game>-checklist.md`（现有：`spire-checklist.md`） |
 | 与宿主视频分析/剪辑能力的边界与替换方式 | `references/routing.md` |
@@ -87,6 +94,22 @@ python3 "$REPO/skills/$SKILL/scripts/check_postproduction.py" --help
 本 skill 负责**推进流程并盯到成片**——素材登记 → 事件解析 → 解说与分镜 → `edit_plan` →
 **交给宿主的剪辑能力执行** → **取回实际导出的成片做审查**（`ready` 门槛）。
 **不要**因为一句话里出现"剪辑"就退回只给计划、把整件事丢回给用户。
+
+**不能用"先做样片、等批准"当默认动作**：只有真的需要用户决策（改稿方向、公开/隐私边界、
+付费额度、素材里无法判断的事实）才停下回来问。其余步骤自己往下推，包括失败后换合法修法重试。
+
+### 一句话 → 成片的默认路径（细节与命令见 `references/runbook.md`）
+
+1. `preflight` 摸源（音轨/采集密度/摘要/时长）→ 有 `undetermined` 就是没通过；
+2. 视频理解通道取**候选**叙事单元 → **回源帧核验**（模型读数不算事实）；
+3. 写解说准备（五要素内部结构、三字段分列）→ 需要的稿先合成一版**量时长**；
+4. 定 EDL（源区间 1x、只剪无信息等待、定格显式登记）→ `build_sample.sh` 组装；
+5. 字幕**短语分页** + 真尺寸 ASS + libass 烧录 → **像素级抽检**（不是数 SRT 条数）；
+6. 审听（**独立无字幕音轨**）与审片（**最终实际导出的 MP4**）分开做；
+7. `audit` + `ready` 门槛 → 交付说明里分清**已验证 / 未验证 / 机器不证明什么**。
+
+**四层长度不是一回事**：1 个叙事单元 ≠ 1 个 TTS 组 ≠ 1 条字幕 cue ≠ 1 个镜头。
+配音按语义组合成，字幕按短语分页，画面按段裁切 —— 混用就会出"字幕压 HUD""配音比画面长 8 秒"。
 
 **不用**：**纯**切片/合成/导出操作（只要求剪或导，不涉及流程与审片）→ 直接交给宿主的剪辑能力；
 只要求"第几秒发生了什么"或逐字稿 → 宿主的定位/转写能力；只要求调用模型看视频 → 宿主的视频理解通道；
@@ -188,10 +211,26 @@ python3 "$C" ready "review-sheet.md" --final-mp4 "/abs/path/final.mp4" \
 | `audit` | timeline TSV + preflight 台账 + 静默台账 + 字幕 + 音轨 + 成片 + 制作 receipt（`--edl` 可选） | **"采用时间线自洽"**：旁白声明的 (素材, 回合, 源区间) 与本行真实画面源区间交叉核对通过（跨回合句必须覆盖镜头跨度）、跨阶段句显式声明且同一事件不提前讲结果、`freeze>0` 都有带源时间码的标注（奖励保持帧还须落在候选可见区间内）、旁白放得进窗口、**按实际声段**算的每段长静默有依据、字幕/音轨/成片按**内容 hash + 字幕文本与时点**绑定且 receipt 证明同属一次制作、源台账不 stale。 |
 | `ready` | Markdown + `--final-mp4` + 上面那一整套审计输入 | **"可交付就绪"**：A1–A5/E1–E9/G1–G3 全部**明确判定为「是」且有证据**（仅 G2 允许 N/A）、无未填占位符、无未解决 issue、H 段**明确且唯一地写「通过」**、末段媒体的**元数据/轨道**经独立 `ffprobe` 探测并与声明时长在容差内一致，**且采用时间线通过语义审计**。 |
 
-**本 skill 的离线测试是"检查器套件"，不是完整渲染引擎**：端到端跑满的只有 `tools/voice/build_sample.sh`
-那条短合成路径（几秒 lavfi 素材）。该组装器只支持**单源视频、1x 速度、EDL 的 src/offset/freeze/字幕**，
-以及能把标注真正烧进画面的 freeze（需要 ffmpeg `drawtext`）；超出的形态它会**明确失败并保持 draft**，
-不会假装支持。真实录屏的剪辑/合成/导出仍由你选的外部工具完成。
+**本 skill 的离线测试是"检查器套件 + 一条短合成制作链"，不是完整渲染引擎**：
+端到端跑满的是 `tools/voice/build_sample.sh` 那条短合成路径（几秒 lavfi 素材），
+它支持**单源视频、1x 速度、EDL 的 src/offset/freeze/字幕**、libass 烧字幕（`BURN_SUBS=1`）、
+以及把源原声与旁白分轨混音（`KEEP_SRC_AUDIO=1`，带 sidechain duck）；
+能把标注真正烧进画面的 freeze 需要 ffmpeg `drawtext`。超出的形态它会**明确失败并保持 draft**，
+不会假装支持。真实长片的剪辑/合成/导出仍由你选的外部工具完成。
+
+**字幕有真检查，不是只数条数**（`references/runbook.md` §6）：
+
+```bash
+V=tools/voice
+python3 "$V/subtitles.py" build --cues out/cues.tsv --srt out/subs.srt --ass out/subs.ass \
+    --w 960 --h 966                      # 短语分页 + PlayRes=视频尺寸的 ASS（总厘秒进位）
+python3 "$V/burn_subs.py" out/final-nosub.mp4 out/subs.srt out/final.mp4   # libass 烧录
+python3 "$V/check_burned_subs.py" --video out/final.mp4 --baseline out/final-nosub.mp4 \
+    --subs out/subs.srt --band 900:966 --protect 655:845 --margin-x 40     # 逐像素抽检
+```
+
+`check_burned_subs.py` 用未烧字幕的同帧做差分，回答：**这条真的烧上了吗 / 有没有越出字幕带 /
+有没有碰到左右边距（末字被裁）/ 有没有压到保护带**。它**不证明**听感、语义一致性与断句质量。
 
 **`ready` / `audit` 不做什么**：它们**不观看画面、不听音轨、不检查帧内容、不验证音画同步**，
 也不做画面质量与听感判定 —— 不替代人工审片。审计报告里有一项 `not_a_verdict_on` 明确写着：
@@ -207,6 +246,8 @@ python3 "$C" ready "review-sheet.md" --final-mp4 "/abs/path/final.mp4" \
 ## 故意不加
 
 - 不内置剪辑/合成/导出实现：那是**宿主的剪辑能力**（作者本机用过 `editor`，只是可替换实现之一）。
+- **不给字幕准备 PNG overlay 后备链**：它在长片上会漏烧（实测 74 条只进 1 条）且依赖临时目录。
+  没有 libass 就是 `blocked: 烧字幕`，可以出 SRT/ASS 文件，但不许说"字幕已进成片"。
 - 不做逐帧/逐字稿：交给**宿主的定位/转写能力**。
 - 不建视频理解适配器：交给**宿主的视频理解通道**（本包不含任何模型、端点或额度）。
 - 不为其他游戏预置清单：**没适配就明确说没适配**。

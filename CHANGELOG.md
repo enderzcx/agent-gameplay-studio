@@ -1,5 +1,52 @@
 # Changelog
 
+## Unreleased — 2026-09-24 (round 4)
+
+**One prompt → finished cut: an executable default path, real subtitles, and honest source audio.**
+
+The skill said it would drive an end-to-end request to a finished cut, but there was no executable
+default path: the burn-in step was not in the pipeline, the assembler dropped the source audio, and the
+"how do I actually call the video-understanding channel" knowledge lived only in a project-local
+script. Closed with the smallest pieces that were already proven on a real 92-second pilot.
+
+- **`references/runbook.md` — the default execution path.** One prompt in, ordered steps out
+  (preflight → candidate events → back-to-source verification → commentary → EDL → assembly →
+  paging/burn → pixel check → listen review + picture review → `audit` + `ready`), with the exact
+  commands, the failure semantics, and the four cases that legitimately require asking the user.
+  It states plainly that this is an **agent-executed skill plus toolset, not a resident deterministic
+  one-click director**, and that a missing dependency, missing authorization or thin source material
+  must surface as a real error instead of a plausible-looking artefact. It also pins the four lengths
+  that must never be conflated: narrative unit ≠ TTS group ≠ subtitle cue ≠ shot.
+- **Subtitles are paged, burned and then actually looked at.** New `tools/voice/subtitles.py`
+  (phrase-level paging, SRT + a **true-size** ASS whose `PlayRes` equals the video, total-centisecond
+  timestamps) and a rewritten `tools/voice/burn_subs.py` that burns through ffmpeg **libass**.
+  The Pillow + temporary-PNG + `overlay` chain is **removed**: it burned only the first cue on a long
+  cut and depended on a temp directory. `build_sample.sh` now emits `subs.ass` and takes
+  `BURN_SUBS=1`; the burn happens **before** the receipt is written, so the audit binds the file that
+  is actually delivered, and the unburned cut is kept as `final-nosub.mp4`.
+- **New `tools/voice/check_burned_subs.py` — pixel-level subtitle evidence.** It diffs each cue's
+  frame against the same frame of the unburned cut, so "the word" and "something that was already
+  white" can be told apart, and reports per cue: on screen at all / inside the subtitle band /
+  clear of the left-right safety margin (a clipped final character) / clear of the protected UI band.
+  It is explicit about not judging listening quality, semantic match or line-break comfort.
+- **Source audio can be kept, or the build fails.** `build_sample.sh` gained `KEEP_SRC_AUDIO=1`
+  (slice the source audio with the same EDL, clamp it to the same window, mix under the narration,
+  `SRC_AUDIO_DUCK=1` sidechain-ducks it; both stems survive). With no audio track in the source it
+  **fails closed** rather than shipping a silent track passed off as game audio. The default is still
+  narration-only, and the log says so.
+- **`references/routing.md` rewritten** around the role split that was actually verified: fast video
+  model for structure, high-resolution clip/crop for detail reads, **audio-only** for listen review,
+  **the final exported MP4** for picture review — plus the honest rules for fallbacks (an "automatic
+  fallback" may only be called that once it has been implemented and observed under its real trigger;
+  auth/permission/refusal is never routed around, and oversized uploads use a compressed analysis copy
+  with recorded hashes and time mapping, never a modified master).
+- **`SKILL.md`** now points at the runbook first, forbids "make a sample and wait for approval" as a
+  default move, and states the boundary and the four distinct lengths.
+- Tests: 204 -> **213** offline cases (32 checker + 112 audit + **5 subtitles** + 9 -> **13** EDL
+  assembly + 51 TTS). The new assembly cases cover burn + pixel check, wrong-band rejection,
+  source-audio mixing with silent-source refusal, and refusal to emit a "cut" with no subtitle text.
+  No new runtime dependency: `subtitles.py` and `check_burned_subs.py` are standard library.
+
 ## Unreleased — 2026-09-24
 
 **Production-path closure (review round 3).**

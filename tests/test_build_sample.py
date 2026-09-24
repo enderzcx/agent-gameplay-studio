@@ -338,6 +338,90 @@ def test_bad_header_is_rejected(root: Path, src: Path, vdir: Path) -> None:
     print("ok  test_bad_header_is_rejected（少一列不会静默错位）")
 
 
+def make_av_source(root: Path) -> Path:
+    """带真实音轨的合成源片：用来测「保留原声」这条路（源无音轨时必须失败）。"""
+    src = root / "src-av.mp4"
+    r = run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-f", "lavfi",
+             "-i", "testsrc2=size=320x240:rate=30", "-t", "12",
+             "-f", "lavfi", "-i", "sine=frequency=180:duration=12", "-shortest",
+             "-pix_fmt", "yuv420p", "-c:v", "libx264", "-preset", "ultrafast",
+             "-c:a", "aac", "-ar", "48000", "-ac", "2", str(src)])
+    assert src.exists(), r.stderr
+    return src
+
+
+def has_audio(p: Path) -> bool:
+    return bool(run(["ffprobe", "-v", "error", "-select_streams", "a:0",
+                     "-show_entries", "stream=codec_type", "-of", "csv=p=0", str(p)]).stdout.strip())
+
+
+def test_burn_subs_and_pixel_check(root: Path, src: Path, vdir: Path) -> None:
+    """BURN_SUBS=1：长句必须分页成多条单行 cue、用真尺寸 ASS 烧进成片，并过像素抽检。"""
+    long_line = ("先看敌人意图再决定是补防御还是全力输出因为这一回合的伤害刚好卡在斩杀线下面一点点")
+    p, out = build(root, src, vdir,
+                   f"1\t0.0\t4.0\tshort.wav\t0.0\t0\t{long_line}\n", "burncase",
+                   {"BURN_SUBS": "1"})
+    assert p.returncode == 0, f"烧字幕失败:\n{p.stdout[-600:]}\n{p.stderr[-600:]}"
+    assert (out / "final-nosub.mp4").is_file(), "没有留下未烧版，像素对照就没法做"
+    ass = (out / "subs.ass").read_text(encoding="utf-8")
+    assert "PlayResX: 320" in ass and "PlayResY: 240" in ass, \
+        f"ASS 的 PlayRes 必须等于视频尺寸:\n{ass[:200]}"
+    srt = (out / "subs.srt").read_text(encoding="utf-8")
+    assert srt.count("-->") >= 3, f"长条没有被分页:\n{srt}"
+    q = run([sys.executable, str(HERE.parent / "tools" / "voice" / "check_burned_subs.py"),
+             "--video", str(out / "final.mp4"), "--baseline", str(out / "final-nosub.mp4"),
+             "--subs", str(out / "subs.srt"), "--band", "150:240", "--margin-x", "10",
+             "--json", str(out / "subs-check.json")])
+    assert q.returncode == 0, f"字幕像素抽检没过:\n{q.stdout}\n{q.stderr}"
+    report = json.loads((out / "subs-check.json").read_text(encoding="utf-8"))
+    assert report["sampled_hit"] == report["samples"] and report["samples"] >= 3, report
+    print(f"ok  test_burn_subs_and_pixel_check（{report['cues']} 条 cue / "
+          f"{report['samples']} 采样点全部命中，PlayRes=真尺寸）")
+
+
+def test_pixel_check_catches_a_wrong_band(root: Path, src: Path, vdir: Path) -> None:
+    """抽检必须能抓到"字幕跑到带外"：把带声明在画面顶部，就该失败而不是放行。"""
+    p, out = build(root, src, vdir, "1\t0.0\t2.0\tshort.wav\t0.0\t0\t顶部没字的\n", "wrongband",
+                   {"BURN_SUBS": "1"})
+    assert p.returncode == 0, p.stderr[-400:]
+    q = run([sys.executable, str(HERE.parent / "tools" / "voice" / "check_burned_subs.py"),
+             "--video", str(out / "final.mp4"), "--baseline", str(out / "final-nosub.mp4"),
+             "--subs", str(out / "subs.srt"), "--band", "0:60", "--margin-x", "10"])
+    assert q.returncode != 0 and "字幕带" in (q.stdout + q.stderr), (q.stdout, q.stderr)
+    print("ok  test_pixel_check_catches_a_wrong_band（带声明错就失败，不是永远通过）")
+
+
+def test_keep_source_audio_mixes_and_refuses_silent_source(root: Path, src: Path, vdir: Path) -> None:
+    av = make_av_source(root)
+    p, out = build(root, av, vdir, "1\t0.0\t2.0\tshort.wav\t0.1\t0\t保留原声\n", "keepsrc",
+                   {"KEEP_SRC_AUDIO": "1"})
+    assert p.returncode == 0, f"保留原声失败:\n{p.stdout[-500:]}\n{p.stderr[-500:]}"
+    assert (out / "src_audio.wav").is_file(), "没有产出与原片同源的 src_audio.wav"
+    assert has_audio(out / "final.mp4"), "开了 KEEP_SRC_AUDIO 却仍然没有音轨"
+    assert has_audio(out / "voice_master.wav"), "旁白母版不该被原声覆盖"
+    sd, vd = dur(out / "src_audio.wav"), dur(out / "video_raw.mp4")
+    assert abs(sd - vd) < 0.15, f"原声轨 {sd}s 与画面 {vd}s 不等长，混出来必然错位"
+    assert "已混入源原声" in p.stdout, p.stdout
+
+    # 源片没有音轨时：必须失败、不许拿静音轨冒充原声
+    p2, out2 = build(root, src, vdir, "1\t0.0\t2.0\tshort.wav\t0.1\t0\t假装有原声\n", "keepsilent",
+                     {"KEEP_SRC_AUDIO": "1"})
+    assert p2.returncode == 3, f"无声源却成功了:\n{p2.stdout}\n{p2.stderr}"
+    assert (out2 / "DRAFT.txt").exists() and not (out2 / "final.mp4").exists(), \
+        "该失败的时候既没标 draft 又留了成片"
+    assert "没有音轨" in p2.stderr, p2.stderr
+    print("ok  test_keep_source_audio_mixes_and_refuses_silent_source"
+          "（有原声才混、等长把关；无原声直接失败）")
+
+
+def test_no_subtitle_text_is_refused(root: Path, src: Path, vdir: Path) -> None:
+    p, out = build(root, src, vdir, "1\t0.0\t2.0\tshort.wav\t0.1\t0\t \n", "nosubs",
+                   {"BURN_SUBS": "1"})
+    assert p.returncode == 3 and (out / "DRAFT.txt").exists(), (p.returncode, p.stderr)
+    assert not (out / "final.mp4").exists(), "没有字幕文本却产出了成片"
+    print("ok  test_no_subtitle_text_is_refused（没有字幕文本 → draft，不产出「成片」）")
+
+
 def main() -> int:
     if not SCRIPT.exists():
         print(f"找不到 {SCRIPT}", file=sys.stderr)
@@ -351,9 +435,12 @@ def main() -> int:
                    test_first_build_closes_the_loop_in_one_invocation,
                    test_source_and_recipe_mismatches_fail_before_rendering,
                    test_freeze_is_burned_in_or_explicitly_draft,
-                   test_subtitle_must_match_the_real_span):
+                   test_subtitle_must_match_the_real_span,
+                   test_burn_subs_and_pixel_check, test_pixel_check_catches_a_wrong_band,
+                   test_keep_source_audio_mixes_and_refuses_silent_source,
+                   test_no_subtitle_text_is_refused):
             fn(root, src, vdir)
-        print("\n全部通过（9 项）")
+        print("\n全部通过（13 项）")
         return 0
     finally:
         shutil.rmtree(root, ignore_errors=True)

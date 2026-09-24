@@ -24,7 +24,7 @@ parts that need judgement stay yours, and the parts that must not be fudged are 
   at the app level, and compiles from source — no signed binary is shipped.
 - **Voice and assembly tools** (`tools/voice/`) — an optional TTS adapter, an EDL assembler that
   refuses to export a mistimed cut, and a subtitle burner for ffmpeg builds without libass.
-- **204 offline tests** that need no network, no keys and no game.
+- **213 offline tests** that need no network, no keys and no game.
 
 New here? Go to [Quick start](#quick-start-shortest-path-that-actually-works), then
 [Using the skill](#using-the-skill), then read
@@ -44,8 +44,9 @@ This project is separate from `agent-gamebench`, an agent evaluation project —
 ## Quick start (shortest path that actually works)
 
 Requires **Python 3.9+** — verified, not assumed: the entire offline suite was run on Python
-**3.9.6**. `ffmpeg`/`ffprobe` are needed for media steps and for `ready` mode; `Pillow` only for the
-optional subtitle burner. The checker itself is pure standard library.
+**3.9.6**. `ffmpeg`/`ffprobe` are needed for media steps and for `ready` mode; burning subtitles
+additionally needs an `ffmpeg` built with **libass** (`ffmpeg -filters | grep ass`). The checkers
+themselves are pure standard library.
 
 ```bash
 git clone https://github.com/enderzcx/agent-gameplay-studio.git
@@ -178,7 +179,8 @@ evidence is in this repo; "unverified" means nobody has shown it works.
 | Input preflight (audio `present`/`silent`/`absent`, sampling `normal`/`sparse`) | **Verified — offline** | `tests/test_timeline_audit.py`: real ffmpeg/ffprobe on lavfi-generated media, including the `undetermined` failure path |
 | Adopted-timeline audit (phase anchors, labelled holds, visible window, silence ledger, version binding, stale manifest) | **Verified — offline** | Same suite: 112 cases over anonymous synthetic fixtures, each defect reproduced by a committed fixture (anchors, phase declaration, audio-span silence, content binding, receipt, numeric rejection) |
 | Perceived delivery, factual semantics, "is this cut any good" | **Not judged — by design** | `audit` reports a `not_a_verdict_on` list; only a human listening/watching plus source-frame checks can settle these |
-| EDL assembly with synthetic media (real `ffmpeg`) | **Verified — offline** | `tests/test_build_sample.py`: 9 cases, lavfi fixtures, incl. the one-shot adopted-timeline loop, A/B source mismatch and the freeze fail-closed path |
+| Subtitle paging and ASS time base | **Verified — offline** | `tests/test_subtitles.py`: 5 cases — phrase paging covers the span exactly, total-centisecond ASS carry, PlayRes = video size, escaping |
+| EDL assembly with synthetic media (real `ffmpeg`) | **Verified — offline** | `tests/test_build_sample.py`: 13 cases, lavfi fixtures, incl. the one-shot adopted-timeline loop, A/B source mismatch, the freeze fail-closed path, libass burn + pixel check, wrong-band detection, source-audio mix and silent-source refusal |
 | TTS adapter hard guarantees (no rewrite, empty/unmeasurable audio fails, no dud cache, per-node re-render) | **Verified — offline** | `tests/test_tts_guarantees.py`: 51 cases against a loopback fake endpoint |
 | TTS adapter works with **your** provider | **Unverified — by design** | Only one wire shape is targeted; no cross-vendor claim is made |
 | macOS recorder compiles and its offline checks pass | **Verified** | `tools/gamerec/tests/regression.sh` offline group: 20 checks, incl. both no-overwrite gates |
@@ -241,7 +243,7 @@ The `skills/gameplay-postproduction/` package is a standard Agent Skill: `SKILL.
 | Artifact validation (`timeline`/`units`/`sheet`/`ready`) | Python 3.9+, `ffprobe` for `ready` | **Yes** |
 | Media bookkeeping, cut assembly | `ffmpeg` / `ffprobe` | Not bundled; install it |
 | Recording game audio + picture | macOS 15+, Screen Recording permission | **Source included** (`tools/gamerec/`), you compile it |
-| Subtitle burn-in | Python `Pillow` | Not bundled; `pip install Pillow` |
+| Subtitle paging and burn-in | `ffmpeg` **with libass** | **Included** (`tools/voice/subtitles.py` + `burn_subs.py` + `check_burned_subs.py`) |
 | **Video understanding / event extraction** | *Your* model channel | **No. Not bundled.** |
 | **Speech synthesis** | *Your* TTS endpoint + key | **No. Only an optional adapter — and not a provider abstraction.** |
 | Cutting / compositing / export | *Your* editor | **No. Not bundled.** |
