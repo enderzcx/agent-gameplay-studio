@@ -63,3 +63,9 @@ Thumbs.db
 *.swp
 .idea/
 .vscode/
+
+# 本地模型/伴生工具的 job 目录：**不进版本库**。
+# 这些目录里有 attempts/meta/result，含本机绝对路径与调用细节，
+# 属于本地审计记录，不应随仓库公开。文件保留在本地，不做删除。
+.gemini-companion/
+.grok-companion/
