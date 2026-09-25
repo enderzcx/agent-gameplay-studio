@@ -21,7 +21,7 @@ metadata:
 | 录制（窗口/应用、音画、完整性） | `window-recording`（agent-capture） |
 | 游玩 | **主 Agent 用已有的游戏工具实际玩** |
 | 后期（素材登记、解说、时间线、审片、成片） | `gameplay-postproduction` |
-| 交接凭证 | 本 skill 的 `scripts/run_manifest.py` |
+| 交接凭证 | **canonical 总控**：`<studio>/tools/production/production_run.py` |
 
 ## Boundary
 
@@ -36,7 +36,9 @@ metadata:
 
 ### 1. 录制**有效开始**之后才允许开局
 
-`run_manifest.py set-game` 会检查 `capture=pass`。不是 pass 就**拒绝**记录对局结果。
+`production_run.py play-start` 需要一份**刚刚查的**采集状态报告：它要求
+`status=recording`、`first_video_frame=true`、带 `capture_id`，且快照在**新鲜窗口**内
+（过期的状态会被拒）。没通过 `record-ready` 就没有 `recording` 阶段，`play-start` 直接拒绝。
 
 为什么值得单独设一道门：录屏"看起来在跑"和"真的录到了东西"是两件事。
 进程活着但一帧都没收到是完全可能的。如果不设这道门，
@@ -58,15 +60,22 @@ postproduction_ready 后期能开始/已完成吗
 
 **特别地**：`audio_signal_observed=false`（整段没声音）**不是失败**。
 游戏开局前本来就是静音的；把它当失败条件会**死锁等一个永远不来的信号**。
+若本次用 `audio_mode=none`（源本来就没有音频），verify 的静音**不作为失败**——
+判据只用实测：帧在持续到达、轨道已核实。
+
+**后期结论同理**：`ready` 需要真正的审计输入跑过、且审听/审看都有真实证据；
+拿不到就落 `needs_review`，**不允许**用"音量看起来正常"顶替独立听感。
 
 ### 3. 异常只重试**相应阶段**，不重开新局
 
-每个阶段有独立的 `attempts`。重跑 verify 只会让 `capture.attempts+1`，
-**不会**新建 run_id、**不会**重开一局。run_id 一换，"这一局"就没了。
+`production_run.py` 用 `revision` 做 CAS：每次变更要带当前 `revision`，
+不匹配就拒绝（"reread the run before retrying"）。
+后期被判 `needs_review` 后，`edit-start` 允许在**同一个 run** 上继续修片，
+**不**新建 run_id、**不**重玩一遍。run_id 一换，"这一局"就没了。
 
 ### 4. 后期**不能**反向影响对局
 
-`set-post` 只写 postproduction 段，**永远不碰** game 段。
+`deliver` 只写 postproduction 字段，**永远不碰** `game_result`。
 审片发现的问题只能改成片，不能改"当时对局发生了什么"。
 这是评审公平性的底线：**后期不得反向提示参赛玩家**。
 
@@ -78,51 +87,108 @@ postproduction_ready 后期能开始/已完成吗
 - 用 mock / 事后渲染的动画冒充真实窗口采集
 - 拿旧素材当成这一局录的
 
-`set-game` 只记录结论，**无法**验证你真的玩了 —— 所以这条靠执行者守，
+`game-finish` 只记录结论，**无法**验证你真的玩了 —— 所以这条靠执行者守，
 而不是靠工具拦。工具能拦的是"没录上就记结果"（规则 1）。
 
 ## 流程
 
 ```bash
+# 工具在 studio 仓库里（安装态则在快照下）：
+#   <studio>/tools/production/production_run.py        ← canonical 总控（唯一）
+#   <studio>/tools/production/postproduction_report.py ← 后期 report 生成器
+#   <studio>/tools/production/state_io.py              ← 状态 IO（锁 + 原子写）
 RUN=demo-01
 JOB=./run
-MAN=$JOB/$RUN.manifest.json
+PR=$JOB/prod                 # journal 目录
+PROD=<studio>/tools/production
 
-# 0) 建交接凭证
-python3 scripts/run_manifest.py init --manifest "$MAN" --run-id "$RUN" --game "Chess"
+# 0) 建 run
+python3 $PROD/production_run.py --root "$PR" --run-id "$RUN" init \
+  --game "Chess" --player "DSH agent" --mode content
 
 # 1) 录制前：先看有什么可录，再预检（不要跳）
 python3 <agent-capture>/scripts/agent_capture.py targets
 python3 <agent-capture>/scripts/agent_capture.py preflight \
   --video-app com.apple.Chess --audio-app com.apple.Chess
 
-# 2) 开始录（后台 worker；等"有效开始"再开局）
+# 2) 开始录
 python3 <agent-capture>/scripts/agent_capture.py start \
   --video-app com.apple.Chess --audio-app com.apple.Chess \
   --job-dir "$JOB" --run-id "$RUN" --out "$JOB/$RUN.mp4" --duration 180
 
-#   轮询直到 status=running（= 有效开始），**不要**在 starting 时就开局
+# 3) **先确认录制有效开始**，再把 run 推进到 recording
+#    轮询到 status=running（= 采集初始化 + 有效首帧），不要用 starting
 python3 <agent-capture>/scripts/agent_capture.py status --job-dir "$JOB" --run-id "$RUN"
+python3 <agent-capture>/scripts/agent_capture.py report \
+  --job-dir "$JOB" --run-id "$RUN" --production-run-id "$RUN" --out "$JOB/live1.json"
+python3 $PROD/production_run.py --root "$PR" --run-id "$RUN" \
+  record-ready --revision 0 --report "$JOB/live1.json"
 
-# 3) 实际游玩（用已有游戏工具真玩；不抢前台也可以，采集是后台的）
+# 4) **然后**才允许开局（play-start 会再要一份新鲜的采集状态）
+python3 <agent-capture>/scripts/agent_capture.py report \
+  --job-dir "$JOB" --run-id "$RUN" --production-run-id "$RUN" --out "$JOB/live2.json"
+python3 $PROD/production_run.py --root "$PR" --run-id "$RUN" \
+  play-start --revision 1 --report "$JOB/live2.json"
 
-# 4) 停止 + 校验
+# 5) 实际游玩（用已有游戏工具真玩）
+
+# 6) 对局结束：outcome 用真值（won/lost/limit/aborted/error）
+#    报告必须由**真实 adapter 证据**生成，不能手填
+python3 $PROD/production_run.py --root "$PR" --run-id "$RUN" \
+  game-finish --revision 2 --report "$JOB/game.json" --outcome limit
+
+# 7) 停止采集 + 校验，然后封印
 python3 <agent-capture>/scripts/agent_capture.py stop   --job-dir "$JOB" --run-id "$RUN"
 python3 <agent-capture>/scripts/agent_capture.py verify --job-dir "$JOB" --run-id "$RUN"
+python3 <agent-capture>/scripts/agent_capture.py report \
+  --job-dir "$JOB" --run-id "$RUN" --production-run-id "$RUN" --out "$JOB/final.json"
+python3 $PROD/production_run.py --root "$PR" --run-id "$RUN" \
+  capture-finish --revision 3 --report "$JOB/final.json"
+#   → capture_result 只在 stopped + 容器可读 + 帧连续 + 非意外停止 时才是 complete
 
-# 5) 把采集结论写进凭证（capture=pass 之后才允许写对局）
-python3 scripts/run_manifest.py set-capture --manifest "$MAN" --result pass \
-  --media "$JOB/$RUN.mp4" --metrics "$JOB/$RUN.metrics.json"
-python3 scripts/run_manifest.py set-game --manifest "$MAN" --result pass --note "有界示范"
+# 8) 后期（由 gameplay-postproduction 出片），然后进 editing
+python3 $PROD/production_run.py --root "$PR" --run-id "$RUN" edit-start --revision 4
 
-# 6) 交接给 gameplay-postproduction（它 own 后期规范）
-#    ... 出成片 ...
-python3 scripts/run_manifest.py set-post --manifest "$MAN" --result pass \
-  --cut "$JOB/$RUN-cut.mp4"
+# 9) 生成后期 report —— **只读证据，不手填结论**
+#    必给 --checker 指向 gameplay-postproduction 的 check_postproduction.py 及它的
+#    真实 ready 输入；生成器会**自己跑**它并用真实退出码，同时核 final/source/review 摘要。
+python3 $PROD/postproduction_report.py --run-id "$RUN" \
+  --source "$JOB/$RUN.mp4" --final "$OUT/final.mp4" \
+  --checker <gameplay-postproduction>/scripts/check_postproduction.py \
+  --review-sheet ... --timeline ... --preflight ... --silence-ledger ... \
+  --subtitle ... --audio ... --receipt ... \
+  --audio-review-json "$OUT/audio-review.json" \
+  --picture-review-json "$OUT/picture-review.json" \
+  --out "$JOB/post.json"
 
-# 7) 自检：run_id 一致性 / 门禁有没有被绕过
-python3 scripts/run_manifest.py verify --manifest "$MAN"
+# 10) 交付
+python3 $PROD/production_run.py --root "$PR" --run-id "$RUN" \
+  deliver --revision 5 --report "$JOB/post.json"
+#   → delivered 只在 status=ready **且** capture_result=complete 时成立；
+#     否则 needs_review。**不要**为了 closeout 手填 pass。
+
+# 11) 交接 / 查状态
+python3 $PROD/production_run.py --root "$PR" --run-id "$RUN" handoff
+python3 $PROD/production_run.py --root "$PR" --run-id "$RUN" status
 ```
+
+### 审听与审看必须**各自有真实输入**
+
+`postproduction_report.py` 的审听/审看信封分两层：
+
+| 字段 | 含义 |
+|---|---|
+| `subject_final.sha256` | 这次审的是**哪一版成片**（必须等于本次 final） |
+| `input_media{path,sha256}` | **实际拿去审的那个文件**（音轨 wav / 成片 mp4），实算哈希并入 `review_evidence` |
+
+**独立审听要真的听音轨**：音量统计或"带字幕的视频看着清晰"**不能**算独立听感。
+拿不到有效听感结论就如实填 `unknown` —— 那会让最终状态落在 `needs_review`，
+这正是正确的表达。
+
+### 旧 `run_manifest.py` 已废弃
+
+它已被 canonical 取代并**从仓库移除**。不要再调用它，也不存在
+`set-capture --result pass` 这种可手填 `pass` 的入口。
 
 ## 交接给 gameplay-postproduction 时带什么
 
@@ -136,7 +202,8 @@ python3 scripts/run_manifest.py verify --manifest "$MAN"
 
 跑完应给出：
 
-1. `run_manifest.py verify` 的 `ok` 与 `problems`
+1. `production_run.py status` 的 stage 与三个结果字段
+   （`capture_result` / `game_result` / `postproduction_result`）
 2. 三个结论**分开**列出（含 `unknown` 的那些，不要藏）
 3. 成片路径（文件名含 run_id）
 4. **明确说清没验证什么**：音画同步、画面内容质量、
