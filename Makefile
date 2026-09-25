@@ -6,7 +6,7 @@ C  := skills/gameplay-postproduction/scripts/check_postproduction.py
 A  := skills/gameplay-postproduction/scripts/check_timeline_audit.py
 
 .DEFAULT_GOAL := help
-.PHONY: help check test-checker test-audit test-subtitles test-assembly test-tts recorder recorder-offline check-examples clean
+.PHONY: help check test-checker test-audit test-subtitles test-assembly test-tts test-manifest recorder recorder-offline check-examples clean
 
 help:  ## Show this help
 	@echo "agent-gameplay-studio — available targets:"
@@ -16,7 +16,7 @@ help:  ## Show this help
 	@echo "Full offline verification:  make check"
 	@echo "Structure-only examples:    make check-examples"
 
-check: test-checker test-audit test-subtitles test-assembly test-tts  ## Run every offline test (no network, no keys, no game)
+check: test-checker test-audit test-subtitles test-assembly test-tts test-manifest  ## Run every offline test (no network, no keys, no game)
 	@echo
 	@echo "offline tests: OK"
 
@@ -34,6 +34,9 @@ test-assembly:  ## EDL assembler smoke test on synthetic media (real ffmpeg; bur
 
 test-tts:  ## TTS hard guarantees against a local fake endpoint (loopback only)
 	$(PY) tests/test_tts_guarantees.py
+
+test-manifest:  ## gameplay-production run manifest: gates, run_id binding, per-stage retry
+	$(PY) tests/test_run_manifest.py
 
 check-examples:  ## Run the checker over examples/ (structure semantics only)
 	@for m in timeline units sheet; do \
